@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor directories
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test videos
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.webm
+

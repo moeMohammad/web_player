@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Media Player</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        
+        <div id="drop-zone" class="drop-zone">
+            <div class="drop-zone-content">
+                <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <p class="drop-text">Drop video file here</p>
+                <p class="drop-subtext">or</p>
+                <button id="file-select-btn" class="file-select-btn">Choose File</button>
+                <input type="file" id="file-input" accept=".mp4,.mkv,.webm,video/*" hidden>
+                <p class="supported-formats">Supports MP4, MKV, WebM</p>
+            </div>
+        </div>
+
+        
+        <div id="player-container" class="player-container hidden">
+            
+            <div class="video-wrapper">
+                <video id="video-player" crossorigin="anonymous"></video>
+                <div id="subtitle-overlay" class="subtitle-overlay"></div>
+            </div>
+
+            
+            <div id="loading-overlay" class="loading-overlay hidden">
+                <div class="spinner"></div>
+                <p id="loading-text">Processing video...</p>
+            </div>
+
+            
+            <div id="controls" class="controls">
+                
+                <div class="progress-container">
+                    <input type="range" id="progress-bar" class="progress-bar" value="0" min="0" max="100" step="0.1">
+                    <div id="progress-fill" class="progress-fill"></div>
+                    <div id="buffer-bar" class="buffer-bar"></div>
+                </div>
+
+                
+                <div class="controls-row">
+                    <div class="controls-left">
+                        
+                        <button id="play-pause-btn" class="control-btn" title="Play/Pause (Space)">
+                            <svg id="play-icon" class="icon" viewBox="0 0 24 24" fill="currentColor">
+                                <polygon points="5 3 19 12 5 21 5 3"/>
+                            </svg>
+                            <svg id="pause-icon" class="icon hidden" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="6" y="4" width="4" height="16"/>
+                                <rect x="14" y="4" width="4" height="16"/>
+                            </svg>
+                        </button>
+
+                        
+                        <div class="volume-control">
+                            <button id="mute-btn" class="control-btn" title="Mute (M)">
+                                <svg id="volume-icon" class="icon" viewBox="0 0 24 24" fill="currentColor">
+                                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" stroke="currentColor" stroke-width="2" fill="none"/>
+                                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" stroke="currentColor" stroke-width="2" fill="none"/>
+                                </svg>
+                                <svg id="muted-icon" class="icon hidden" viewBox="0 0 24 24" fill="currentColor">
+                                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                                    <line x1="23" y1="9" x2="17" y2="15" stroke="currentColor" stroke-width="2"/>
+                                    <line x1="17" y1="9" x2="23" y2="15" stroke="currentColor" stroke-width="2"/>
+                                </svg>
+                            </button>
+                            <input type="range" id="volume-slider" class="volume-slider" min="0" max="1" step="0.05" value="1">
+                        </div>
+
+                        
+                        <div class="time-display">
+                            <span id="current-time">0:00</span>
+                            <span class="time-separator">/</span>
+                            <span id="duration">0:00</span>
+                        </div>
+                    </div>
+
+                    <div class="controls-right">
+                        
+                        <div class="track-selector" id="subtitle-selector-container">
+                            <label for="subtitle-select">CC</label>
+                            <select id="subtitle-select" class="track-select" title="Subtitles (C)">
+                                <option value="-1">Off</option>
+                            </select>
+                            
+                            <button id="subtitle-settings-btn" class="control-btn control-btn-sm" title="Subtitle Settings">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="12" cy="12" r="3"/>
+                                    <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+                                </svg>
+                            </button>
+                            
+                            <div id="subtitle-settings-popup" class="subtitle-settings-popup hidden">
+                                <div class="subtitle-setting">
+                                    <label>Size</label>
+                                    <div class="setting-control">
+                                        <button class="setting-btn" id="sub-size-down">−</button>
+                                        <span id="sub-size-value">100%</span>
+                                        <button class="setting-btn" id="sub-size-up">+</button>
+                                    </div>
+                                </div>
+                                <div class="subtitle-setting">
+                                    <label>Position</label>
+                                    <div class="setting-control">
+                                        <button class="setting-btn" id="sub-pos-down">↓</button>
+                                        <span id="sub-pos-value">12%</span>
+                                        <button class="setting-btn" id="sub-pos-up">↑</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        
+                        <div class="track-selector" id="audio-selector-container">
+                            <label for="audio-select">Audio</label>
+                            <select id="audio-select" class="track-select">
+                                <option value="0">Default</option>
+                            </select>
+                        </div>
+
+                        
+                        <button id="fullscreen-btn" class="control-btn" title="Fullscreen (F)">
+                            <svg id="fullscreen-icon" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 3 21 3 21 9"/>
+                                <polyline points="9 21 3 21 3 15"/>
+                                <polyline points="21 15 21 21 15 21"/>
+                                <polyline points="3 9 3 3 9 3"/>
+                            </svg>
+                            <svg id="exit-fullscreen-icon" class="icon hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="4 14 10 14 10 20"/>
+                                <polyline points="20 10 14 10 14 4"/>
+                                <polyline points="14 20 14 14 20 14"/>
+                                <polyline points="10 4 10 10 4 10"/>
+                            </svg>
+                        </button>
+
+                        
+                        <button id="new-file-btn" class="control-btn" title="Open new file">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                <polyline points="14 2 14 8 20 8"/>
+                                <line x1="12" y1="18" x2="12" y2="12"/>
+                                <line x1="9" y1="15" x2="15" y2="15"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            
+            <div id="file-info" class="file-info">
+                <span id="file-name"></span>
+            </div>
+        </div>
+    </div>
+
+    
+    <script src="js/subtitle-renderer.js"></script>
+    <script src="js/ffmpeg-handler.js"></script>
+    <script src="js/player.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
+

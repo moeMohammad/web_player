@@ -1,0 +1,20 @@
+{
+  "name": "local-media-player",
+  "version": "1.0.0",
+  "description": "A browser-based video player that plays MKV and MP4 files locally",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "video",
+    "player",
+    "mkv",
+    "mp4",
+    "ffmpeg",
+    "wasm"
+  ],
+  "license": "MIT"
+}
+
