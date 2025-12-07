@@ -24,26 +24,21 @@ const MIME_TYPES = {
 };
 
 const server = http.createServer((req, res) => {
-    
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
-    
     if (req.method === 'OPTIONS') {
         res.writeHead(200);
         res.end();
         return;
     }
 
-    
     let filePath = req.url === '/' ? '/index.html' : req.url;
     
-    
     filePath = filePath.split('?')[0];
-    
     
     filePath = path.normalize(filePath).replace(/^(\.\.[\/\\])+/, '');
     

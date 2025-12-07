@@ -9,7 +9,6 @@
 </head>
 <body>
     <div id="app">
-        
         <div id="drop-zone" class="drop-zone">
             <div class="drop-zone-content">
                 <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -25,33 +24,27 @@
             </div>
         </div>
 
-        
         <div id="player-container" class="player-container hidden">
-            
             <div class="video-wrapper">
                 <video id="video-player" crossorigin="anonymous"></video>
+                <canvas id="pgs-canvas" class="pgs-canvas"></canvas>
                 <div id="subtitle-overlay" class="subtitle-overlay"></div>
             </div>
 
-            
             <div id="loading-overlay" class="loading-overlay hidden">
                 <div class="spinner"></div>
                 <p id="loading-text">Processing video...</p>
             </div>
 
-            
             <div id="controls" class="controls">
-                
                 <div class="progress-container">
                     <input type="range" id="progress-bar" class="progress-bar" value="0" min="0" max="100" step="0.1">
                     <div id="progress-fill" class="progress-fill"></div>
                     <div id="buffer-bar" class="buffer-bar"></div>
                 </div>
 
-                
                 <div class="controls-row">
                     <div class="controls-left">
-                        
                         <button id="play-pause-btn" class="control-btn" title="Play/Pause (Space)">
                             <svg id="play-icon" class="icon" viewBox="0 0 24 24" fill="currentColor">
                                 <polygon points="5 3 19 12 5 21 5 3"/>
@@ -62,7 +55,6 @@
                             </svg>
                         </button>
 
-                        
                         <div class="volume-control">
                             <button id="mute-btn" class="control-btn" title="Mute (M)">
                                 <svg id="volume-icon" class="icon" viewBox="0 0 24 24" fill="currentColor">
@@ -79,7 +71,6 @@
                             <input type="range" id="volume-slider" class="volume-slider" min="0" max="1" step="0.05" value="1">
                         </div>
 
-                        
                         <div class="time-display">
                             <span id="current-time">0:00</span>
                             <span class="time-separator">/</span>
@@ -88,7 +79,6 @@
                     </div>
 
                     <div class="controls-right">
-                        
                         <div class="track-selector" id="subtitle-selector-container">
                             <label for="subtitle-select">CC</label>
                             <select id="subtitle-select" class="track-select" title="Subtitles (C)">
@@ -122,7 +112,6 @@
                             </div>
                         </div>
 
-                        
                         <div class="track-selector" id="audio-selector-container">
                             <label for="audio-select">Audio</label>
                             <select id="audio-select" class="track-select">
@@ -130,7 +119,6 @@
                             </select>
                         </div>
 
-                        
                         <button id="fullscreen-btn" class="control-btn" title="Fullscreen (F)">
                             <svg id="fullscreen-icon" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <polyline points="15 3 21 3 21 9"/>
@@ -146,7 +134,6 @@
                             </svg>
                         </button>
 
-                        
                         <button id="new-file-btn" class="control-btn" title="Open new file">
                             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -159,15 +146,15 @@
                 </div>
             </div>
 
-            
             <div id="file-info" class="file-info">
                 <span id="file-name"></span>
             </div>
         </div>
     </div>
 
-    
     <script src="js/subtitle-renderer.js"></script>
+    <script src="js/pgs-parser.js"></script>
+    <script src="js/pgs-renderer.js"></script>
     <script src="js/ffmpeg-handler.js"></script>
     <script src="js/player.js"></script>
     <script src="js/main.js"></script>

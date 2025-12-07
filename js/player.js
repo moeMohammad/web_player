@@ -69,6 +69,8 @@ const VideoPlayer = (function() {
 
         
         SubtitleRenderer.init(video, document.getElementById('subtitle-overlay'));
+        
+        PGSRenderer.init(video, document.getElementById('pgs-canvas'));
 
         
         setupVideoEvents();
@@ -261,12 +263,64 @@ const VideoPlayer = (function() {
             const trackIndex = parseInt(subtitleSelect.value);
             if (trackIndex === -1) {
                 SubtitleRenderer.disableAllTracks();
+                PGSRenderer.stop();
                 return;
             }
             
             
             if (processedMkvData && processedMkvData.subtitleStreams) {
                 const streamInfo = processedMkvData.subtitleStreams[trackIndex];
+                
+                if (streamInfo && streamInfo.isBitmap) {
+                    SubtitleRenderer.disableAllTracks();
+                    
+                    if (!streamInfo.pgsExtracted) {
+                        try {
+                            showLoading('Extracting PGS subtitle (this may take a moment)...');
+                            const pgsData = await FFmpegHandler.extractPgsSubtitle(
+                                currentFile,
+                                trackIndex,
+                                streamInfo.language,
+                                (msg) => showLoading(msg)
+                            );
+                            
+                            if (pgsData && pgsData.supData) {
+                                const count = PGSRenderer.loadSubtitles(pgsData.supData, video.duration);
+                                if (count > 0) {
+                                    streamInfo.pgsExtracted = true;
+                                    streamInfo.pgsData = pgsData;
+                                    PGSRenderer.start();
+                                    hideLoading();
+                                } else {
+                                    hideLoading();
+                                    alert('Failed to parse PGS subtitle data. The format may be unsupported.');
+                                    subtitleSelect.value = '-1';
+                                    return;
+                                }
+                            } else {
+                                hideLoading();
+                                alert('Failed to extract PGS subtitle.');
+                                subtitleSelect.value = '-1';
+                                return;
+                            }
+                        } catch (e) {
+                            console.error('Failed to extract PGS subtitle:', e);
+                            hideLoading();
+                            alert('Failed to extract PGS subtitle: ' + e.message);
+                            subtitleSelect.value = '-1';
+                            return;
+                        }
+                    } else {
+                        if (streamInfo.pgsData && streamInfo.pgsData.supData) {
+                            PGSRenderer.loadSubtitles(streamInfo.pgsData.supData, video.duration);
+                        }
+                        PGSRenderer.start();
+                    }
+                    return;
+                }
+                
+                PGSRenderer.stop();
+                
                 if (streamInfo && !streamInfo.extracted) {
                     try {
                         showLoading('Extracting subtitle...');
@@ -274,10 +328,17 @@ const VideoPlayer = (function() {
                             currentFile,
                             trackIndex,
                             streamInfo.language,
-                            (msg) => showLoading(msg)
+                            (msg) => showLoading(msg),
+                            streamInfo.codec
                         );
                         
                         if (subtitle) {
+                            if (subtitle.isBitmap || subtitle.error) {
+                                hideLoading();
+                                streamInfo.isBitmap = true;
+                                subtitleSelect.dispatchEvent(new Event('change'));
+                                return;
+                            }
                             
                             const rendererIndex = SubtitleRenderer.addTrack(subtitle.content, subtitle.label, subtitle.language);
                             streamInfo.extracted = true;
@@ -288,7 +349,7 @@ const VideoPlayer = (function() {
                     } catch (e) {
                         console.error('Failed to extract subtitle:', e);
                         hideLoading();
-                        alert('Failed to extract subtitle track');
+                        alert('Failed to extract subtitle track: ' + e.message);
                         subtitleSelect.value = '-1';
                         return;
                     }
@@ -525,6 +586,20 @@ const VideoPlayer = (function() {
                 
                 if (canPlay) {
                     console.log('Direct playback successful!');
+                    
+                    const unsupportedAudioCodecs = ['eac3', 'ac3', 'dts', 'truehd', 'mlp'];
+                    const hasUnsupportedAudio = audioStreams.some(a => 
+                        unsupportedAudioCodecs.some(c => a.codec && a.codec.includes(c))
+                    );
+                    
+                    if (hasUnsupportedAudio) {
+                        console.warn('Audio codec may not be supported in browser:', audioStreams[0]?.codec);
+                        setTimeout(() => {
+                            const audioCodec = audioStreams[0]?.codec?.toUpperCase() || 'Unknown';
+                            console.log(`Note: This video uses ${audioCodec} audio which may not play in your browser.`);
+                        }, 1000);
+                    }
+                    
                     video.src = directUrl;
                     
                     
@@ -539,6 +614,8 @@ const VideoPlayer = (function() {
                             index: i,
                             label: stream.language || `Track ${i + 1}`,
                             language: stream.language || "und",
+                            codec: stream.codec,
+                            isBitmap: stream.isBitmap || false,
                             extracted: false,
                         })),
                         subtitles: [],
@@ -769,7 +846,11 @@ const VideoPlayer = (function() {
         subtitleStreams.forEach((stream, index) => {
             const option = document.createElement('option');
             option.value = index;
-            option.textContent = stream.label;
+            if (stream.isBitmap) {
+                option.textContent = `${stream.label} (PGS)`;
+            } else {
+                option.textContent = stream.label;
+            }
             subtitleSelect.appendChild(option);
         });
     }
@@ -856,6 +937,7 @@ const VideoPlayer = (function() {
         currentFile = null;
         processedMkvData = null;
         SubtitleRenderer.clearTracks();
+        PGSRenderer.stop();
 
         
         document.getElementById('drop-zone').classList.remove('hidden');
@@ -919,11 +1001,19 @@ const VideoPlayer = (function() {
                         codec: codec,
                     });
                 } else if (type.toLowerCase() === "subtitle") {
+                    const bitmapCodecs = ['hdmv_pgs_subtitle', 'pgssub', 'pgs', 'dvd_subtitle', 'dvdsub', 'dvb_subtitle', 'dvbsub', 'xsub'];
+                    const isBitmap = bitmapCodecs.some(c => codec.includes(c));
+                    
                     subtitleStreams.push({
                         index: subtitleStreams.length,
                         language: language || "und",
                         codec: codec,
+                        isBitmap: isBitmap,
                     });
+                    
+                    if (isBitmap) {
+                        console.warn(`Subtitle stream ${subtitleStreams.length - 1} is bitmap-based (${codec}) - cannot be extracted as text`);
+                    }
                 }
             }
         }

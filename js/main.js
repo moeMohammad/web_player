@@ -3,38 +3,29 @@
 (function() {
     'use strict';
 
-    
     let dropZone = null;
     let fileInput = null;
     let fileSelectBtn = null;
 
-    
     function init() {
-        
         dropZone = document.getElementById('drop-zone');
         fileInput = document.getElementById('file-input');
         fileSelectBtn = document.getElementById('file-select-btn');
 
-        
         VideoPlayer.init();
 
-        
         setupFileInput();
 
-        
         setupDragAndDrop();
 
         console.log('Local Media Player initialized');
     }
 
-    
     function setupFileInput() {
-        
         fileSelectBtn.addEventListener('click', () => {
             fileInput.click();
         });
 
-        
         fileInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (file) {
@@ -45,45 +36,36 @@
         });
     }
 
-    
     function setupDragAndDrop() {
-        
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             document.addEventListener(eventName, preventDefaults, false);
         });
 
-        
         dropZone.addEventListener('dragenter', handleDragEnter);
         dropZone.addEventListener('dragover', handleDragOver);
         dropZone.addEventListener('dragleave', handleDragLeave);
         dropZone.addEventListener('drop', handleDrop);
     }
 
-    
     function preventDefaults(e) {
         e.preventDefault();
         e.stopPropagation();
     }
 
-    
     function handleDragEnter(e) {
         dropZone.classList.add('drag-over');
     }
 
-    
     function handleDragOver(e) {
         dropZone.classList.add('drag-over');
     }
 
-    
     function handleDragLeave(e) {
-        
         if (!dropZone.contains(e.relatedTarget)) {
             dropZone.classList.remove('drag-over');
         }
     }
 
-    
     function handleDrop(e) {
         dropZone.classList.remove('drag-over');
 
@@ -95,9 +77,7 @@
         }
     }
 
-    
     function handleFile(file) {
-        
         if (!isValidVideoFile(file)) {
             alert('Please select a valid video file (MP4, MKV, or WebM)');
             return;
@@ -105,7 +85,6 @@
 
         const isMkv = file.name.toLowerCase().endsWith('.mkv');
         const fileSizeGB = file.size / (1024 * 1024 * 1024);
-        
         
         if (isMkv && file.size > 2.5 * 1024 * 1024 * 1024) { 
             console.log(`Large MKV file: ${fileSizeGB.toFixed(1)} GB - will try direct playback first`);
@@ -118,11 +97,9 @@
 
         console.log('Loading file:', file.name, 'Size:', formatFileSize(file.size));
 
-        
         VideoPlayer.loadFile(file);
     }
 
-    
     function isValidVideoFile(file) {
         const validExtensions = ['.mp4', '.mkv', '.webm', '.m4v', '.mov'];
         const validMimeTypes = [
@@ -140,7 +117,6 @@
         return hasValidExtension || hasValidMimeType;
     }
 
-    
     function formatFileSize(bytes) {
         if (bytes === 0) return '0 Bytes';
 
@@ -151,7 +127,6 @@
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
-    
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {

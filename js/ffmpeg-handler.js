@@ -153,10 +153,26 @@ const FFmpegHandler = (function () {
     "av01",
   ];
 
+  const BITMAP_SUBTITLE_CODECS = [
+    "hdmv_pgs_subtitle",
+    "pgssub",
+    "pgs",
+    "dvd_subtitle",
+    "dvdsub",
+    "dvb_subtitle",
+    "dvbsub",
+    "xsub",
+  ];
+
   
   function isVideoCodecSupported(codec) {
     const lowerCodec = codec.toLowerCase();
     return SUPPORTED_VIDEO_CODECS.some((c) => lowerCodec.includes(c));
+  }
+
+  function isBitmapSubtitle(codec) {
+    const lowerCodec = codec.toLowerCase();
+    return BITMAP_SUBTITLE_CODECS.some((c) => lowerCodec.includes(c));
   }
 
   
@@ -461,12 +477,17 @@ const FFmpegHandler = (function () {
             codec: codec,
           });
         } else if (type.toLowerCase() === "subtitle") {
+          const isBitmap = isBitmapSubtitle(codec);
           subtitleStreams.push({
             index: subtitleStreams.length,
             streamIdx: parseInt(streamIdx),
             language: language || "und",
             codec: codec,
+            isBitmap: isBitmap,
           });
+          if (isBitmap) {
+            console.warn(`Subtitle stream ${subtitleStreams.length - 1} is bitmap-based (${codec}) and cannot be converted to text`);
+          }
         }
       }
     }
@@ -475,7 +496,19 @@ const FFmpegHandler = (function () {
   }
 
   
-  async function extractSubtitle(file, subtitleIndex, language, progressCallback) {
+  async function extractSubtitle(file, subtitleIndex, language, progressCallback, subtitleCodec = null) {
+    if (subtitleCodec && isBitmapSubtitle(subtitleCodec)) {
+      console.warn(`Cannot extract subtitle track ${subtitleIndex}: ${subtitleCodec} is a bitmap format`);
+      return {
+        index: subtitleIndex,
+        label: language || `Track ${subtitleIndex + 1}`,
+        language: language || "und",
+        content: null,
+        error: `This subtitle track uses ${subtitleCodec.toUpperCase()} format (bitmap-based). Bitmap subtitles from Blu-rays/DVDs cannot be converted to text in the browser. They require OCR (Optical Character Recognition) which is not available here.`,
+        isBitmap: true,
+      };
+    }
+
     await loadFFmpeg(progressCallback);
     setProgressCallback(progressCallback);
     
@@ -547,6 +580,74 @@ const FFmpegHandler = (function () {
     }
   }
 
+  async function extractPgsSubtitle(file, subtitleIndex, language, progressCallback) {
+    await loadFFmpeg(progressCallback);
+    setProgressCallback(progressCallback);
+    
+    const LARGE_FILE_THRESHOLD = 2 * 1024 * 1024 * 1024;
+    const isLargeFile = file.size >= LARGE_FILE_THRESHOLD;
+    const outputName = `subtitle_${subtitleIndex}.sup`;
+    
+    let inputPath;
+    let mountDir = null;
+    
+    try {
+      if (progressCallback) progressCallback(`Extracting PGS subtitle track ${subtitleIndex + 1}...`);
+      
+      if (isLargeFile) {
+        console.log(`Using WORKERFS for PGS extraction (file: ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+        
+        mountDir = `/workerfs_pgs_${Date.now()}`;
+        await ffmpeg.createDir(mountDir);
+        await ffmpeg.mount("WORKERFS", { files: [file] }, mountDir);
+        inputPath = `${mountDir}/${file.name}`;
+      } else {
+        inputPath = "pgs_input" + getExtension(file.name);
+        const fileData = await safeReadFile(file);
+        await ffmpeg.writeFile(inputPath, new Uint8Array(fileData));
+      }
+      
+      await ffmpeg.exec([
+        "-i",
+        inputPath,
+        "-map",
+        `0:s:${subtitleIndex}`,
+        "-c:s",
+        "copy",
+        outputName,
+      ]);
+      
+      const data = await ffmpeg.readFile(outputName);
+      console.log(`[PGS] Extracted ${data.length} bytes of SUP data`);
+      
+      await ffmpeg.deleteFile(outputName);
+      if (isLargeFile && mountDir) {
+        await ffmpeg.unmount(mountDir);
+      } else {
+        await ffmpeg.deleteFile(inputPath);
+      }
+      
+      return {
+        index: subtitleIndex,
+        label: language || `Track ${subtitleIndex + 1}`,
+        language: language || "und",
+        supData: data.buffer,
+        isPgs: true,
+      };
+    } catch (e) {
+      console.warn(`Failed to extract PGS subtitle track ${subtitleIndex}:`, e);
+      try {
+        await ffmpeg.deleteFile(outputName);
+        if (isLargeFile && mountDir) {
+          await ffmpeg.unmount(mountDir);
+        } else if (!isLargeFile) {
+          await ffmpeg.deleteFile(inputPath);
+        }
+      } catch (cleanupErr) {}
+      return null;
+    }
+  }
+
   
   async function processMkvFile(file, progressCallback) {
     const result = {
@@ -591,6 +692,7 @@ const FFmpegHandler = (function () {
         label: stream.language || `Track ${stream.index + 1}`,
         language: stream.language || "und",
         codec: stream.codec,
+        isBitmap: stream.isBitmap || false,
         extracted: false,
       }));
 
@@ -848,6 +950,7 @@ const FFmpegHandler = (function () {
     getMediaInfo,
     extractAllSubtitles,
     extractSubtitle,
+    extractPgsSubtitle,
     transmuxToMp4,
     processMkvFile,
     isFFmpegLoaded,
