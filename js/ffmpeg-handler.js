@@ -423,14 +423,12 @@ const FFmpegHandler = (function () {
   async function analyzeStreams(file, progressCallback) {
     await loadFFmpeg(progressCallback);
     
-    const analysisName = "analysis" + getExtension(file.name);
-    
-    
+    // Use 10MB chunk for fast analysis (stream info is in file headers)
+    const inputPath = "analysis" + getExtension(file.name);
     const chunkSize = Math.min(file.size, ANALYSIS_CHUNK_SIZE);
     const chunk = file.slice(0, chunkSize);
     const chunkData = await safeReadFile(chunk);
-    
-    await ffmpeg.writeFile(analysisName, new Uint8Array(chunkData));
+    await ffmpeg.writeFile(inputPath, new Uint8Array(chunkData));
     
     let logOutput = "";
     const logHandler = ({ message }) => {
@@ -439,16 +437,15 @@ const FFmpegHandler = (function () {
     ffmpeg.on("log", logHandler);
     
     try {
-      
-      await ffmpeg.exec(["-i", analysisName, "-f", "null", "-"]);
+      await ffmpeg.exec(["-i", inputPath, "-f", "null", "-"]);
     } catch (e) {
-      
+      // FFmpeg returns error when no output specified, but logs contain stream info
     }
     
     ffmpeg.off("log", logHandler);
-    await ffmpeg.deleteFile(analysisName);
+    await ffmpeg.deleteFile(inputPath);
     
-    
+    // Parse stream information from FFmpeg output
     const videoStreams = [];
     const audioStreams = [];
     const subtitleStreams = [];
@@ -485,12 +482,11 @@ const FFmpegHandler = (function () {
             codec: codec,
             isBitmap: isBitmap,
           });
-          if (isBitmap) {
-            console.warn(`Subtitle stream ${subtitleStreams.length - 1} is bitmap-based (${codec}) and cannot be converted to text`);
-          }
         }
       }
     }
+    
+    console.log(`[analyzeStreams] Found: ${videoStreams.length} video, ${audioStreams.length} audio, ${subtitleStreams.length} subtitle`);
     
     return { videoStreams, audioStreams, subtitleStreams };
   }
@@ -645,6 +641,185 @@ const FFmpegHandler = (function () {
         }
       } catch (cleanupErr) {}
       return null;
+    }
+  }
+
+  // List of audio codecs supported by browsers (no extraction needed)
+  // Be VERY specific - only known-good codecs
+  const SUPPORTED_AUDIO_CODECS = ['aac', 'mp3', 'mp4a', 'flac', 'opus', 'vorbis'];
+  
+  // List of audio codecs definitely NOT supported by browsers (need extraction)
+  const UNSUPPORTED_AUDIO_CODECS = ['ac3', 'eac3', 'e-ac-3', 'dts', 'truehd', 'mlp', 'dca', 'pcm_bluray', 'pcm_dvd'];
+
+  function isAudioCodecSupported(codec) {
+    if (!codec) return false; // Unknown = assume unsupported (safer default)
+    const lowerCodec = codec.toLowerCase();
+    
+    // Only return true if it's EXPLICITLY a known supported codec
+    // This is the safest approach - better to transcode unnecessarily 
+    // than to have no audio
+    return SUPPORTED_AUDIO_CODECS.some(c => lowerCodec.includes(c));
+  }
+
+  function isAudioCodecUnsupported(codec) {
+    if (!codec) return true; // Unknown = assume unsupported (safer default)
+    const lowerCodec = codec.toLowerCase();
+    
+    // First check if it's explicitly supported
+    if (SUPPORTED_AUDIO_CODECS.some(c => lowerCodec.includes(c))) {
+      return false; // Supported
+    }
+    
+    // Otherwise, it's unsupported (either explicitly or unknown)
+    return true;
+  }
+
+  // Extract and transcode audio track for browser playback
+  // Uses WORKERFS for large files to avoid memory issues
+  // Outputs WAV (PCM audio) - larger but guaranteed to work in all browsers
+  async function extractAudioTrack(file, audioIndex, progressCallback) {
+    await loadFFmpeg(progressCallback);
+    setProgressCallback(progressCallback);
+    
+    const LARGE_FILE_THRESHOLD = 2 * 1024 * 1024 * 1024;
+    const isLargeFile = file.size >= LARGE_FILE_THRESHOLD;
+    const outputName = `audio_${audioIndex}_${Date.now()}.wav`;
+    
+    let inputPath;
+    let mountDir = null;
+    let ffmpegLogs = "";
+    
+    // Capture FFmpeg logs for debugging
+    const logHandler = ({ message }) => {
+      ffmpegLogs += message + "\n";
+    };
+    
+    try {
+      if (progressCallback) progressCallback(`Preparing to extract audio track ${audioIndex + 1}...`);
+      
+      if (isLargeFile) {
+        console.log(`[extractAudioTrack] Using WORKERFS (file: ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+        
+        mountDir = `/workerfs_audio_${Date.now()}`;
+        await ffmpeg.createDir(mountDir);
+        await ffmpeg.mount("WORKERFS", { files: [file] }, mountDir);
+        inputPath = `${mountDir}/${file.name}`;
+      } else {
+        inputPath = "audio_input" + getExtension(file.name);
+        const fileData = await safeReadFile(file);
+        await ffmpeg.writeFile(inputPath, new Uint8Array(fileData));
+      }
+      
+      if (progressCallback) progressCallback(`Extracting audio (this may take a while)...`);
+      
+      ffmpeg.on("log", logHandler);
+      
+      // Extract audio to WAV (PCM) format
+      // WAV is uncompressed and universally supported - no encoder issues possible
+      // Using 16-bit signed PCM at 48kHz stereo (standard for video)
+      const result = await ffmpeg.exec([
+        "-i",
+        inputPath,
+        "-map",
+        `0:a:${audioIndex}`,
+        "-vn",              // No video
+        "-sn",              // No subtitles
+        "-c:a",
+        "pcm_s16le",        // 16-bit signed little-endian PCM
+        "-ar",
+        "48000",            // 48kHz sample rate
+        "-ac",
+        "2",                // Stereo
+        "-f",
+        "wav",              // WAV container
+        "-y",
+        outputName,
+      ]);
+      
+      ffmpeg.off("log", logHandler);
+      
+      console.log('[extractAudioTrack] FFmpeg exit code:', result);
+      
+      let data;
+      try {
+        data = await ffmpeg.readFile(outputName);
+      } catch (readErr) {
+        console.error('[extractAudioTrack] Failed to read output file');
+        console.error('[extractAudioTrack] FFmpeg logs:', ffmpegLogs);
+        throw new Error('Audio extraction failed - output file not created');
+      }
+      
+      const sizeMB = data.length / 1024 / 1024;
+      console.log(`[extractAudioTrack] Extracted ${sizeMB.toFixed(2)} MB of WAV audio`);
+      
+      // Validate output - WAV should have reasonable size
+      if (data.length < 10000) {
+        console.error('[extractAudioTrack] Output too small, FFmpeg logs:', ffmpegLogs);
+        throw new Error(`Audio extraction produced invalid output (${data.length} bytes)`);
+      }
+      
+      // Check for valid WAV header (RIFF....WAVE)
+      const header = new Uint8Array(data.slice(0, 12));
+      const riffStr = String.fromCharCode(header[0], header[1], header[2], header[3]);
+      const waveStr = String.fromCharCode(header[8], header[9], header[10], header[11]);
+      if (riffStr !== 'RIFF' || waveStr !== 'WAVE') {
+        console.warn('[extractAudioTrack] Warning: WAV header not found, file may be corrupted');
+        console.error('[extractAudioTrack] First 12 bytes:', Array.from(header));
+      } else {
+        console.log('[extractAudioTrack] Valid WAV file detected');
+      }
+      
+      // Cleanup FFmpeg files
+      try {
+        await ffmpeg.deleteFile(outputName);
+      } catch (e) { /* ignore */ }
+      
+      if (isLargeFile && mountDir) {
+        try {
+          await ffmpeg.unmount(mountDir);
+        } catch (e) { /* ignore */ }
+      } else {
+        try {
+          await ffmpeg.deleteFile(inputPath);
+        } catch (e) { /* ignore */ }
+      }
+      
+      // Create a copy of the data to ensure clean memory
+      const audioData = new Uint8Array(data.length);
+      audioData.set(data);
+      
+      // Create blob from the copied Uint8Array
+      const blob = new Blob([audioData], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+      
+      console.log(`[extractAudioTrack] Created audio blob URL: ${url}, size: ${blob.size} bytes`);
+      
+      return {
+        index: audioIndex,
+        url: url,
+        blob: blob,
+      };
+    } catch (e) {
+      ffmpeg.off("log", logHandler);
+      console.error(`[extractAudioTrack] Failed:`, e);
+      console.error('[extractAudioTrack] FFmpeg logs:', ffmpegLogs);
+      
+      // Cleanup on error
+      try {
+        await ffmpeg.deleteFile(outputName);
+      } catch (cleanupErr) { /* ignore */ }
+      
+      if (isLargeFile && mountDir) {
+        try {
+          await ffmpeg.unmount(mountDir);
+        } catch (cleanupErr) { /* ignore */ }
+      } else if (!isLargeFile && inputPath) {
+        try {
+          await ffmpeg.deleteFile(inputPath);
+        } catch (cleanupErr) { /* ignore */ }
+      }
+      
+      throw new Error(`Failed to extract audio: ${e.message}`);
     }
   }
 
@@ -944,6 +1119,356 @@ const FFmpegHandler = (function () {
     };
   }
 
+  // MSE-related state for persistent file mount
+  let mseMountDir = null;
+  let mseMountedFile = null;
+  let mseInputPath = null;
+  
+  /**
+   * Mount file for MSE operations (keeps file accessible across multiple segment generations)
+   */
+  async function mountFileForMSE(file) {
+    // If already mounted with same file, reuse
+    if (mseMountedFile === file && mseInputPath) {
+      return mseInputPath;
+    }
+    
+    // Unmount any previous file
+    await unmountMSEFile();
+    
+    await loadFFmpeg();
+    
+    mseMountDir = `/mse_${Date.now()}`;
+    
+    try {
+      await ffmpeg.createDir(mseMountDir);
+      await ffmpeg.mount("WORKERFS", { files: [file] }, mseMountDir);
+      mseInputPath = `${mseMountDir}/${file.name}`;
+      mseMountedFile = file;
+      
+      console.log('[FFmpeg] Mounted file for MSE at:', mseInputPath);
+      return mseInputPath;
+    } catch (e) {
+      console.error('[FFmpeg] Failed to mount file for MSE:', e);
+      mseMountDir = null;
+      mseInputPath = null;
+      mseMountedFile = null;
+      throw e;
+    }
+  }
+  
+  /**
+   * Unmount MSE file
+   */
+  async function unmountMSEFile() {
+    if (mseMountDir && ffmpeg) {
+      try {
+        await ffmpeg.unmount(mseMountDir);
+        await ffmpeg.deleteDir(mseMountDir);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+    mseMountDir = null;
+    mseInputPath = null;
+    mseMountedFile = null;
+  }
+  
+  /**
+   * Check if video codec can be copied (already browser-compatible)
+   */
+  function canCopyVideoCodec(codec) {
+    if (!codec) return false;
+    const lowerCodec = codec.toLowerCase();
+    // H.264/AVC can be copied directly
+    return lowerCodec.includes('h264') || 
+           lowerCodec.includes('avc') || 
+           lowerCodec.includes('x264');
+  }
+
+  /**
+   * Generate fragmented MP4 initialization segment (moov atom)
+   * This contains codec info but no media data
+   * @param {File} file - The input file
+   * @param {number} audioTrackIndex - Which audio track to use
+   * @param {string} videoCodec - The video codec (to determine copy vs transcode)
+   * @param {Function} progressCallback - Progress callback
+   */
+  async function generateInitSegment(file, audioTrackIndex = 0, videoCodec = null, progressCallback) {
+    await loadFFmpeg(progressCallback);
+    setProgressCallback(progressCallback);
+    
+    const inputPath = await mountFileForMSE(file);
+    const outputName = `init_${Date.now()}.mp4`;
+    
+    // Determine if we can copy video or need to transcode
+    const copyVideo = canCopyVideoCodec(videoCodec);
+    console.log(`[FFmpeg] Video codec: ${videoCodec}, copy mode: ${copyVideo}`);
+    
+    let ffmpegLogs = "";
+    const logHandler = ({ message }) => {
+      ffmpegLogs += message + "\n";
+    };
+    
+    try {
+      if (progressCallback) progressCallback('Generating initialization segment...');
+      
+      ffmpeg.on("log", logHandler);
+      
+      // Build args based on whether we can copy video
+      const args = [
+        "-i", inputPath,
+        "-t", "0.1",                      // Small duration for init segment
+        "-map", "0:v:0",                  // First video stream
+        "-map", `0:a:${audioTrackIndex}?`, // Selected audio stream
+      ];
+      
+      if (copyVideo) {
+        // Copy video stream (FAST!)
+        args.push("-c:v", "copy");
+      } else {
+        // Transcode video to H.264
+        args.push(
+          "-c:v", "libx264",
+          "-preset", "ultrafast",
+          "-tune", "zerolatency",
+          "-profile:v", "high",
+          "-level", "4.0"
+        );
+      }
+      
+      // Always transcode audio to AAC (the whole point of MSE mode)
+      args.push(
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-ac", "2",                       // Stereo
+        "-ar", "48000",                   // 48kHz
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
+        "-y",
+        outputName
+      );
+      
+      console.log('[FFmpeg] Init segment command:', args.join(' '));
+      await ffmpeg.exec(args);
+      
+      ffmpeg.off("log", logHandler);
+      
+      let data;
+      try {
+        data = await ffmpeg.readFile(outputName);
+      } catch (readErr) {
+        console.error('[FFmpeg] Failed to read init segment:', readErr);
+        console.error('[FFmpeg] Logs:', ffmpegLogs);
+        throw new Error('Failed to generate init segment');
+      }
+      
+      await ffmpeg.deleteFile(outputName);
+      
+      console.log(`[FFmpeg] Init segment: ${data.length} bytes`);
+      
+      // Return as ArrayBuffer
+      return data.buffer;
+      
+    } catch (e) {
+      ffmpeg.off("log", logHandler);
+      console.error('[FFmpeg] Init segment generation failed:', e);
+      console.error('[FFmpeg] Logs:', ffmpegLogs);
+      
+      try {
+        await ffmpeg.deleteFile(outputName);
+      } catch (cleanupErr) {}
+      
+      throw e;
+    }
+  }
+  
+  /**
+   * Generate a fragmented MP4 segment for a time range
+   * @param {File} file - The input file
+   * @param {number} startTime - Start time in seconds
+   * @param {number} duration - Duration in seconds
+   * @param {number} audioTrackIndex - Which audio track to use
+   * @param {string} videoCodec - The video codec (to determine copy vs transcode)
+   * @param {Function} progressCallback - Progress callback
+   * @param {AbortSignal} abortSignal - Abort signal
+   */
+  async function generateSegment(file, startTime, duration, audioTrackIndex = 0, videoCodec = null, progressCallback, abortSignal) {
+    await loadFFmpeg(progressCallback);
+    setProgressCallback(progressCallback);
+    
+    // Check if aborted before starting
+    if (abortSignal && abortSignal.aborted) {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      throw err;
+    }
+    
+    const inputPath = await mountFileForMSE(file);
+    const outputName = `segment_${startTime}_${Date.now()}.mp4`;
+    
+    // Determine if we can copy video or need to transcode
+    const copyVideo = canCopyVideoCodec(videoCodec);
+    
+    let ffmpegLogs = "";
+    const logHandler = ({ message }) => {
+      ffmpegLogs += message + "\n";
+    };
+    
+    try {
+      if (copyVideo) {
+        if (progressCallback) progressCallback(`Processing ${startTime.toFixed(0)}s - ${(startTime + duration).toFixed(0)}s...`);
+      } else {
+        if (progressCallback) progressCallback(`Transcoding ${startTime.toFixed(0)}s - ${(startTime + duration).toFixed(0)}s...`);
+      }
+      
+      ffmpeg.on("log", logHandler);
+      
+      // Build args - use copy for H.264, transcode otherwise
+      const args = [
+        "-ss", String(startTime),         // Seek to start time (input seeking for speed)
+        "-i", inputPath,
+        "-t", String(duration),           // Duration of segment
+        "-map", "0:v:0",                  // First video stream
+        "-map", `0:a:${audioTrackIndex}?`, // Selected audio stream
+      ];
+      
+      if (copyVideo) {
+        // Copy video stream (FAST!)
+        args.push("-c:v", "copy");
+      } else {
+        // Transcode video to H.264
+        args.push(
+          "-c:v", "libx264",
+          "-preset", "ultrafast",
+          "-tune", "zerolatency",
+          "-profile:v", "high",
+          "-level", "4.0",
+          "-g", "30",
+          "-keyint_min", "30",
+          "-sc_threshold", "0"
+        );
+      }
+      
+      // Always transcode audio to AAC
+      args.push(
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-ac", "2",
+        "-ar", "48000",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-frag_duration", "1000000",
+        "-f", "mp4",
+        "-y",
+        outputName
+      );
+      
+      console.log('[FFmpeg] Segment command:', args.join(' '));
+      
+      // Check abort before exec
+      if (abortSignal && abortSignal.aborted) {
+        ffmpeg.off("log", logHandler);
+        const err = new Error('Aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+      
+      await ffmpeg.exec(args);
+      
+      ffmpeg.off("log", logHandler);
+      
+      // Check abort after exec
+      if (abortSignal && abortSignal.aborted) {
+        try {
+          await ffmpeg.deleteFile(outputName);
+        } catch (e) {}
+        const err = new Error('Aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+      
+      let data;
+      try {
+        data = await ffmpeg.readFile(outputName);
+      } catch (readErr) {
+        // Could be end of file
+        console.log('[FFmpeg] Could not read segment, may be end of file');
+        return null;
+      }
+      
+      await ffmpeg.deleteFile(outputName);
+      
+      // Check for very small output (likely end of file or error)
+      if (data.length < 1000) {
+        console.log('[FFmpeg] Segment too small, likely end of file');
+        return null;
+      }
+      
+      console.log(`[FFmpeg] Segment ${startTime}s: ${data.length} bytes`);
+      
+      // Return as ArrayBuffer
+      return data.buffer;
+      
+    } catch (e) {
+      ffmpeg.off("log", logHandler);
+      
+      if (e.name === 'AbortError') {
+        throw e;
+      }
+      
+      console.error('[FFmpeg] Segment generation failed:', e);
+      console.error('[FFmpeg] Logs:', ffmpegLogs);
+      
+      try {
+        await ffmpeg.deleteFile(outputName);
+      } catch (cleanupErr) {}
+      
+      throw e;
+    }
+  }
+  
+  /**
+   * Get media duration using FFprobe-style analysis
+   */
+  async function getMediaDuration(file, progressCallback) {
+    await loadFFmpeg(progressCallback);
+    
+    const inputPath = await mountFileForMSE(file);
+    
+    let logOutput = "";
+    const logHandler = ({ message }) => {
+      logOutput += message + "\n";
+    };
+    
+    ffmpeg.on("log", logHandler);
+    
+    try {
+      // Run FFmpeg to get duration from stream info
+      await ffmpeg.exec(["-i", inputPath, "-f", "null", "-"]);
+    } catch (e) {
+      // Expected to fail, but logs will have duration
+    }
+    
+    ffmpeg.off("log", logHandler);
+    
+    // Parse duration from logs
+    // Format: Duration: HH:MM:SS.ms
+    const durationMatch = logOutput.match(/Duration:\s*(\d{2}):(\d{2}):(\d{2})\.(\d+)/);
+    if (durationMatch) {
+      const hours = parseInt(durationMatch[1]);
+      const minutes = parseInt(durationMatch[2]);
+      const seconds = parseInt(durationMatch[3]);
+      const ms = parseInt(durationMatch[4]);
+      
+      const totalSeconds = hours * 3600 + minutes * 60 + seconds + ms / 100;
+      console.log('[FFmpeg] Detected duration:', totalSeconds, 'seconds');
+      return totalSeconds;
+    }
+    
+    console.warn('[FFmpeg] Could not detect duration');
+    return 0;
+  }
+
   return {
     loadFFmpeg,
     isMkvFile,
@@ -951,10 +1476,19 @@ const FFmpegHandler = (function () {
     extractAllSubtitles,
     extractSubtitle,
     extractPgsSubtitle,
+    extractAudioTrack,
+    isAudioCodecSupported,
+    isAudioCodecUnsupported,
     transmuxToMp4,
     processMkvFile,
     isFFmpegLoaded,
     checkSupport,
+    // MSE support
+    generateInitSegment,
+    generateSegment,
+    getMediaDuration,
+    mountFileForMSE,
+    unmountMSEFile,
   };
 })();
 

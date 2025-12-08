@@ -38,7 +38,7 @@ const VideoPlayer = (function() {
     
     
     let subtitleScale = 0.7;  
-    let subtitlePosition = 6; 
+    let subtitlePosition = 6;
 
     
     function init() {
@@ -252,8 +252,9 @@ const VideoPlayer = (function() {
         
         muteBtn.addEventListener('click', toggleMute);
         volumeSlider.addEventListener('input', () => {
-            video.volume = volumeSlider.value;
-            if (video.volume > 0) {
+            const volume = parseFloat(volumeSlider.value);
+            video.volume = volume;
+            if (volume > 0) {
                 video.muted = false;
             }
         });
@@ -374,6 +375,26 @@ const VideoPlayer = (function() {
             const wasPlaying = !video.paused;
 
             try {
+                // Check if in direct playback mode (large file)
+                if (processedMkvData.isDirectPlayback) {
+                    const audioTrack = processedMkvData.audioTracks[audioIndex];
+                    
+                    if (audioTrack && audioTrack.unsupported) {
+                        // Show warning for unsupported audio
+                        const codecName = audioTrack.codec?.toUpperCase() || 'Unknown';
+                        alert(`Audio format "${codecName}" is not supported by your browser.\n\nTo play this audio track, please convert the file using FFmpeg or HandBrake:\n\nffmpeg -i input.mkv -c:v copy -c:a aac output.mkv`);
+                        
+                        // Reset selection to previous track
+                        audioSelect.value = '0';
+                        return;
+                    }
+                    
+                    // Audio track switching in direct mode not fully supported
+                    console.log('Audio track is browser-supported, but track switching requires remuxing');
+                    return;
+                }
+                
+                // Standard mode - transmux with selected audio track
                 showLoading('Switching audio track...');
 
                 
@@ -587,28 +608,39 @@ const VideoPlayer = (function() {
                 if (canPlay) {
                     console.log('Direct playback successful!');
                     
-                    const unsupportedAudioCodecs = ['eac3', 'ac3', 'dts', 'truehd', 'mlp'];
-                    const hasUnsupportedAudio = audioStreams.some(a => 
-                        unsupportedAudioCodecs.some(c => a.codec && a.codec.includes(c))
-                    );
+                    // Check if ALL audio tracks are unsupported
+                    const allAudioUnsupported = audioStreams.length > 0 && 
+                        audioStreams.every(a => FFmpegHandler.isAudioCodecUnsupported(a.codec));
                     
-                    if (hasUnsupportedAudio) {
-                        console.warn('Audio codec may not be supported in browser:', audioStreams[0]?.codec);
+                    // Show warning if audio is unsupported
+                    if (allAudioUnsupported) {
+                        const defaultAudioTrack = audioStreams[0];
+                        const audioCodec = defaultAudioTrack?.codec?.toUpperCase() || 'Unknown';
+                        console.warn(`Audio codec ${audioCodec} is not supported by browser`);
+                        
+                        // Show warning but continue with video playback
                         setTimeout(() => {
-                            const audioCodec = audioStreams[0]?.codec?.toUpperCase() || 'Unknown';
-                            console.log(`Note: This video uses ${audioCodec} audio which may not play in your browser.`);
-                        }, 1000);
+                            alert(
+                                `⚠️ Audio format "${audioCodec}" is not supported by your browser.\n\n` +
+                                `The video will play without sound.\n\n` +
+                                `To get audio, convert the file using FFmpeg:\n` +
+                                `ffmpeg -i input.mkv -c:v copy -c:a aac output.mkv`
+                            );
+                        }, 500);
                     }
                     
+                    // Use direct playback
                     video.src = directUrl;
-                    
                     
                     processedMkvData = {
                         videoUrl: directUrl,
+                        videoCodec: videoStreams[0]?.codec || 'h264',
                         audioTracks: audioStreams.map((track, i) => ({
                             index: i,
                             label: track.language || `Audio ${i + 1}`,
                             language: track.language || "und",
+                            codec: track.codec,
+                            unsupported: FFmpegHandler.isAudioCodecUnsupported(track.codec),
                         })),
                         subtitleStreams: subtitleStreams.map((stream, i) => ({
                             index: i,
@@ -631,8 +663,13 @@ const VideoPlayer = (function() {
                         document.getElementById('subtitle-selector-container').style.display = 'none';
                     }
                     
-                    
-                    document.getElementById('audio-selector-container').style.display = 'none';
+                    // Show audio selector if there are multiple tracks
+                    if (audioStreams.length > 1) {
+                        populateAudioSelectorWithCodecs(processedMkvData.audioTracks);
+                        document.getElementById('audio-selector-container').style.display = '';
+                    } else {
+                        document.getElementById('audio-selector-container').style.display = 'none';
+                    }
                     
                     hideLoading();
                     try {
@@ -764,9 +801,11 @@ const VideoPlayer = (function() {
     
     function updateVolumeUI() {
         const isMuted = video.muted || video.volume === 0;
+        const volume = video.muted ? 0 : video.volume;
+        
         volumeIcon.classList.toggle('hidden', isMuted);
         mutedIcon.classList.toggle('hidden', !isMuted);
-        volumeSlider.value = video.muted ? 0 : video.volume;
+        volumeSlider.value = volume;
     }
 
     
@@ -867,6 +906,24 @@ const VideoPlayer = (function() {
         });
     }
 
+    // Populate audio selector with codec info for direct playback mode
+    function populateAudioSelectorWithCodecs(audioTracks) {
+        audioSelect.innerHTML = '';
+
+        audioTracks.forEach((track, index) => {
+            const option = document.createElement('option');
+            option.value = index;
+            let label = track.label;
+            // Add codec info if unsupported (will be extracted)
+            if (track.unsupported) {
+                const codecName = track.codec?.toUpperCase() || 'Unknown';
+                label += ` (${codecName})`;
+            }
+            option.textContent = label;
+            audioSelect.appendChild(option);
+        });
+    }
+
     
     function resetTrackSelectors() {
         subtitleSelect.innerHTML = '<option value="-1">Off</option>';
@@ -946,18 +1003,15 @@ const VideoPlayer = (function() {
 
     
     async function analyzeFileStreams(file) {
-        
-        const analysisName = "analysis" + file.name.substring(file.name.lastIndexOf('.'));
         const CHUNK_SIZE = 10 * 1024 * 1024;
-        
         const ffmpeg = await FFmpegHandler.loadFFmpeg();
         
-        
+        // Use 10MB chunk for fast analysis
+        const inputPath = "analysis" + file.name.substring(file.name.lastIndexOf('.'));
         const chunkSize = Math.min(file.size, CHUNK_SIZE);
         const chunk = file.slice(0, chunkSize);
         const chunkData = await chunk.arrayBuffer();
-        
-        await ffmpeg.writeFile(analysisName, new Uint8Array(chunkData));
+        await ffmpeg.writeFile(inputPath, new Uint8Array(chunkData));
         
         let logOutput = "";
         const logHandler = ({ message }) => {
@@ -966,15 +1020,15 @@ const VideoPlayer = (function() {
         ffmpeg.on("log", logHandler);
         
         try {
-            await ffmpeg.exec(["-i", analysisName, "-f", "null", "-"]);
+            await ffmpeg.exec(["-i", inputPath, "-f", "null", "-"]);
         } catch (e) {
-            
+            // FFmpeg returns error when no output, but logs have stream info
         }
         
         ffmpeg.off("log", logHandler);
-        await ffmpeg.deleteFile(analysisName);
+        await ffmpeg.deleteFile(inputPath);
         
-        
+        // Parse stream information
         const videoStreams = [];
         const audioStreams = [];
         const subtitleStreams = [];
@@ -1010,15 +1064,12 @@ const VideoPlayer = (function() {
                         codec: codec,
                         isBitmap: isBitmap,
                     });
-                    
-                    if (isBitmap) {
-                        console.warn(`Subtitle stream ${subtitleStreams.length - 1} is bitmap-based (${codec}) - cannot be extracted as text`);
-                    }
                 }
             }
         }
         
-        console.log(`Found ${videoStreams.length} video, ${audioStreams.length} audio, ${subtitleStreams.length} subtitle streams`);
+        console.log(`[analyzeFileStreams] Found: ${videoStreams.length} video, ${audioStreams.length} audio, ${subtitleStreams.length} subtitle`);
+        
         return { videoStreams, audioStreams, subtitleStreams };
     }
 
