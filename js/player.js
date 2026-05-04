@@ -3,7 +3,7 @@
 const VideoPlayer = (function() {
     'use strict';
 
-    
+
     let video = null;
     let playerContainer = null;
     let controls = null;
@@ -27,22 +27,30 @@ const VideoPlayer = (function() {
     let loadingOverlay = null;
     let loadingText = null;
     let fileNameEl = null;
+    let statusPanel = null;
+    let statusTitle = null;
+    let statusMessage = null;
+    let statusCloseBtn = null;
 
-    
+
     let currentFile = null;
     let processedMkvData = null;
+    let currentVideoUrl = null;
+    let activeLoadId = 0;
+    let suppressVideoErrors = false;
+    let mseState = null;
     let controlsTimeout = null;
     let cursorTimeout = null;
     let isControlsVisible = false;
     let lastVolume = 1;
-    
-    
-    let subtitleScale = 0.7;  
+
+
+    let subtitleScale = 0.7;
     let subtitlePosition = 6;
 
-    
+
     function init() {
-        
+
         video = document.getElementById('video-player');
         playerContainer = document.getElementById('player-container');
         controls = document.getElementById('controls');
@@ -66,22 +74,33 @@ const VideoPlayer = (function() {
         loadingOverlay = document.getElementById('loading-overlay');
         loadingText = document.getElementById('loading-text');
         fileNameEl = document.getElementById('file-name');
+        statusPanel = document.getElementById('status-panel');
+        statusTitle = document.getElementById('status-title');
+        statusMessage = document.getElementById('status-message');
+        statusCloseBtn = document.getElementById('status-close-btn');
 
-        
+
         SubtitleRenderer.init(video, document.getElementById('subtitle-overlay'));
-        
+
         PGSRenderer.init(video, document.getElementById('pgs-canvas'));
 
-        
+
         setupVideoEvents();
         setupControlEvents();
         setupKeyboardShortcuts();
         setupSubtitleSettings();
+        setupStatusEvents();
 
-        console.log('Video player initialized');
     }
 
-    
+
+    function setupStatusEvents() {
+        if (statusCloseBtn) {
+            statusCloseBtn.addEventListener('click', hideStatus);
+        }
+    }
+
+
     function setupSubtitleSettings() {
         const settingsBtn = document.getElementById('subtitle-settings-btn');
         const settingsPopup = document.getElementById('subtitle-settings-popup');
@@ -92,25 +111,25 @@ const VideoPlayer = (function() {
         const posDown = document.getElementById('sub-pos-down');
         const posValue = document.getElementById('sub-pos-value');
 
-        
+
         settingsBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             settingsPopup.classList.toggle('hidden');
         });
 
-        
+
         document.addEventListener('click', (e) => {
             if (!settingsPopup.contains(e.target) && e.target !== settingsBtn) {
                 settingsPopup.classList.add('hidden');
             }
         });
 
-        
+
         settingsPopup.addEventListener('click', (e) => {
             e.stopPropagation();
         });
 
-        
+
         sizeUp.addEventListener('click', () => {
             subtitleScale = Math.min(2.5, subtitleScale + 0.1);
             updateSubtitleStyles();
@@ -123,7 +142,7 @@ const VideoPlayer = (function() {
             sizeValue.textContent = Math.round(subtitleScale * 100) + '%';
         });
 
-        
+
         posUp.addEventListener('click', () => {
             subtitlePosition = Math.min(40, subtitlePosition + 2);
             updateSubtitleStyles();
@@ -136,19 +155,19 @@ const VideoPlayer = (function() {
             posValue.textContent = subtitlePosition + '%';
         });
 
-        
+
         sizeValue.textContent = Math.round(subtitleScale * 100) + '%';
         posValue.textContent = subtitlePosition + '%';
         updateSubtitleStyles();
     }
 
-    
+
     function updateSubtitleStyles() {
         document.documentElement.style.setProperty('--subtitle-scale', subtitleScale);
         document.documentElement.style.setProperty('--subtitle-position', subtitlePosition + '%');
     }
 
-    
+
     function setupVideoEvents() {
         video.addEventListener('loadedmetadata', () => {
             durationEl.textContent = formatTime(video.duration);
@@ -170,7 +189,7 @@ const VideoPlayer = (function() {
         video.addEventListener('play', () => {
             playIcon.classList.add('hidden');
             pauseIcon.classList.remove('hidden');
-            
+
             if (document.fullscreenElement) {
                 hideCursorDelayed();
                 hideControlsDelayed();
@@ -180,7 +199,7 @@ const VideoPlayer = (function() {
         video.addEventListener('pause', () => {
             playIcon.classList.remove('hidden');
             pauseIcon.classList.add('hidden');
-            
+
             showCursor();
             showControlsTemporarily();
         });
@@ -203,10 +222,14 @@ const VideoPlayer = (function() {
         });
 
         video.addEventListener('error', (e) => {
+            if (suppressVideoErrors) {
+                return;
+            }
+
             hideLoading();
             const error = video.error;
             let errorMessage = 'Unknown error';
-            
+
             if (error) {
                 switch (error.code) {
                     case MediaError.MEDIA_ERR_ABORTED:
@@ -225,31 +248,35 @@ const VideoPlayer = (function() {
                         errorMessage = `Error code: ${error.code}, message: ${error.message || 'none'}`;
                 }
             }
-            
+
             console.error('Video error:', errorMessage, error);
-            alert(`Error playing video: ${errorMessage}\n\nTip: If your MKV contains HEVC/H.265 video, it may not be supported. Try a video with H.264 codec.`);
+            showStatus(
+                'Playback failed',
+                `${errorMessage}. If this is an MKV with H.265/x265 video, browser playback is intentionally deferred in this version. H.264/x264 MP4 and MKV are the primary target.`,
+                'error'
+            );
         });
 
-        
+
         video.addEventListener('dblclick', toggleFullscreen);
 
-        
+
         video.addEventListener('click', togglePlayPause);
     }
 
-    
+
     function setupControlEvents() {
-        
+
         playPauseBtn.addEventListener('click', togglePlayPause);
 
-        
+
         progressBar.addEventListener('input', () => {
             video.currentTime = progressBar.value;
             const percent = (progressBar.value / video.duration) * 100;
             progressFill.style.width = `${percent}%`;
         });
 
-        
+
         muteBtn.addEventListener('click', toggleMute);
         volumeSlider.addEventListener('input', () => {
             const volume = parseFloat(volumeSlider.value);
@@ -259,7 +286,7 @@ const VideoPlayer = (function() {
             }
         });
 
-        
+
         subtitleSelect.addEventListener('change', async () => {
             const trackIndex = parseInt(subtitleSelect.value);
             if (trackIndex === -1) {
@@ -267,14 +294,25 @@ const VideoPlayer = (function() {
                 PGSRenderer.stop();
                 return;
             }
-            
-            
+
+
             if (processedMkvData && processedMkvData.subtitleStreams) {
                 const streamInfo = processedMkvData.subtitleStreams[trackIndex];
-                
+
                 if (streamInfo && streamInfo.isBitmap) {
                     SubtitleRenderer.disableAllTracks();
-                    
+
+                    if (!streamInfo.isPgs) {
+                        PGSRenderer.stop();
+                        showStatus(
+                            'Bitmap subtitle unsupported',
+                            `${(streamInfo.codec || 'bitmap').toUpperCase()} subtitles are not supported in this version. PGS bitmap subtitles are supported; DVD/DVB/XSub bitmap rendering is deferred.`,
+                            'warning'
+                        );
+                        subtitleSelect.value = '-1';
+                        return;
+                    }
+
                     if (!streamInfo.pgsExtracted) {
                         try {
                             showLoading('Extracting PGS subtitle (this may take a moment)...');
@@ -284,7 +322,7 @@ const VideoPlayer = (function() {
                                 streamInfo.language,
                                 (msg) => showLoading(msg)
                             );
-                            
+
                             if (pgsData && pgsData.supData) {
                                 const count = PGSRenderer.loadSubtitles(pgsData.supData, video.duration);
                                 if (count > 0) {
@@ -294,20 +332,20 @@ const VideoPlayer = (function() {
                                     hideLoading();
                                 } else {
                                     hideLoading();
-                                    alert('Failed to parse PGS subtitle data. The format may be unsupported.');
+                                    showStatus('PGS subtitle failed', 'Failed to parse PGS subtitle data. The stream may use unsupported bitmap features.', 'warning');
                                     subtitleSelect.value = '-1';
                                     return;
                                 }
                             } else {
                                 hideLoading();
-                                alert('Failed to extract PGS subtitle.');
+                                showStatus('PGS subtitle failed', 'Failed to extract the selected PGS subtitle stream.', 'warning');
                                 subtitleSelect.value = '-1';
                                 return;
                             }
                         } catch (e) {
                             console.error('Failed to extract PGS subtitle:', e);
                             hideLoading();
-                            alert('Failed to extract PGS subtitle: ' + e.message);
+                            showStatus('PGS subtitle failed', e.message, 'warning');
                             subtitleSelect.value = '-1';
                             return;
                         }
@@ -319,9 +357,9 @@ const VideoPlayer = (function() {
                     }
                     return;
                 }
-                
+
                 PGSRenderer.stop();
-                
+
                 if (streamInfo && !streamInfo.extracted) {
                     try {
                         showLoading('Extracting subtitle...');
@@ -332,7 +370,7 @@ const VideoPlayer = (function() {
                             (msg) => showLoading(msg),
                             streamInfo.codec
                         );
-                        
+
                         if (subtitle) {
                             if (subtitle.isBitmap || subtitle.error) {
                                 hideLoading();
@@ -340,7 +378,7 @@ const VideoPlayer = (function() {
                                 subtitleSelect.dispatchEvent(new Event('change'));
                                 return;
                             }
-                            
+
                             const rendererIndex = SubtitleRenderer.addTrack(subtitle.content, subtitle.label, subtitle.language);
                             streamInfo.extracted = true;
                             streamInfo.rendererIndex = rendererIndex;
@@ -350,23 +388,23 @@ const VideoPlayer = (function() {
                     } catch (e) {
                         console.error('Failed to extract subtitle:', e);
                         hideLoading();
-                        alert('Failed to extract subtitle track: ' + e.message);
+                        showStatus('Subtitle extraction failed', e.message, 'warning');
                         subtitleSelect.value = '-1';
                         return;
                     }
                 }
-                
-                
+
+
                 if (streamInfo && streamInfo.extracted) {
                     SubtitleRenderer.enableTrack(streamInfo.rendererIndex);
                 }
             } else {
-                
+
                 SubtitleRenderer.enableTrack(trackIndex);
             }
         });
 
-        
+
         audioSelect.addEventListener('change', async () => {
             if (!processedMkvData || !currentFile) return;
 
@@ -378,31 +416,34 @@ const VideoPlayer = (function() {
                 // Check if in direct playback mode (large file)
                 if (processedMkvData.isDirectPlayback) {
                     const audioTrack = processedMkvData.audioTracks[audioIndex];
-                    
+
                     if (audioTrack && audioTrack.unsupported) {
                         // Show warning for unsupported audio
                         const codecName = audioTrack.codec?.toUpperCase() || 'Unknown';
-                        alert(`Audio format "${codecName}" is not supported by your browser.\n\nTo play this audio track, please convert the file using FFmpeg or HandBrake:\n\nffmpeg -i input.mkv -c:v copy -c:a aac output.mkv`);
-                        
+                        showStatus(
+                            'Audio track unavailable',
+                            `Audio format "${codecName}" is not supported in direct browser playback. Use the streaming remux fallback or convert audio to AAC for this track.`,
+                            'warning'
+                        );
+
                         // Reset selection to previous track
                         audioSelect.value = '0';
                         return;
                     }
-                    
+
                     // Audio track switching in direct mode not fully supported
-                    console.log('Audio track is browser-supported, but track switching requires remuxing');
+                    showStatus(
+                        'Audio switching needs remux',
+                        'This file is playing directly, so browser-level audio track switching is limited. Reopen the file after converting alternate tracks to AAC if you need a different track.',
+                        'warning'
+                    );
                     return;
                 }
-                
+
                 // Standard mode - transmux with selected audio track
                 showLoading('Switching audio track...');
 
-                
-                if (processedMkvData.videoUrl) {
-                    URL.revokeObjectURL(processedMkvData.videoUrl);
-                }
 
-                
                 const newUrl = await FFmpegHandler.transmuxToMp4(
                     currentFile,
                     audioIndex,
@@ -410,9 +451,9 @@ const VideoPlayer = (function() {
                 );
 
                 processedMkvData.videoUrl = newUrl;
-                video.src = newUrl;
-                
-                
+                setVideoUrl(newUrl);
+
+
                 video.addEventListener('loadedmetadata', function onLoad() {
                     video.currentTime = currentTime;
                     if (wasPlaying) {
@@ -425,22 +466,22 @@ const VideoPlayer = (function() {
             } catch (error) {
                 console.error('Error switching audio track:', error);
                 hideLoading();
-                alert('Failed to switch audio track: ' + error.message);
+                showStatus('Audio switch failed', error.message, 'error');
             }
         });
 
-        
+
         fullscreenBtn.addEventListener('click', toggleFullscreen);
-        
+
         document.addEventListener('fullscreenchange', updateFullscreenUI);
         document.addEventListener('webkitfullscreenchange', updateFullscreenUI);
 
-        
+
         document.getElementById('new-file-btn').addEventListener('click', () => {
             document.getElementById('file-input').click();
         });
 
-        
+
         playerContainer.addEventListener('mousemove', handleMouseMove);
         playerContainer.addEventListener('mouseleave', () => {
             if (!video.paused) {
@@ -449,18 +490,18 @@ const VideoPlayer = (function() {
         });
     }
 
-    
+
     function handleMouseMove() {
         showControlsTemporarily();
         showCursor();
-        
-        
+
+
         if (document.fullscreenElement && !video.paused) {
             hideCursorDelayed();
         }
     }
 
-    
+
     function showCursor() {
         playerContainer.classList.remove('cursor-hidden');
         if (cursorTimeout) {
@@ -469,7 +510,7 @@ const VideoPlayer = (function() {
         }
     }
 
-    
+
     function hideCursorDelayed() {
         if (cursorTimeout) {
             clearTimeout(cursorTimeout);
@@ -481,15 +522,15 @@ const VideoPlayer = (function() {
         }, 2500);
     }
 
-    
+
     function setupKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            
+
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
                 return;
             }
 
-            
+
             if (playerContainer.classList.contains('hidden')) {
                 return;
             }
@@ -541,229 +582,578 @@ const VideoPlayer = (function() {
         });
     }
 
-    
+
     async function loadFile(file) {
+        await cleanupCurrentPlayback();
+        const loadId = ++activeLoadId;
+
         currentFile = file;
         processedMkvData = null;
 
-        
+
         document.getElementById('drop-zone').classList.add('hidden');
         playerContainer.classList.remove('hidden');
 
-        
+
         SubtitleRenderer.clearTracks();
         resetTrackSelectors();
+        hideStatus();
 
-        
+
         fileNameEl.textContent = file.name;
 
-        
+
         const isMkv = FFmpegHandler.isMkvFile(file);
 
         if (isMkv) {
-            await loadMkvFile(file);
+            await loadMkvFile(file, loadId);
         } else {
             await loadDirectFile(file);
         }
     }
 
-    
-    async function loadMkvFile(file) {
+
+    async function loadMkvFile(file, loadId) {
+        const directUrl = URL.createObjectURL(file);
+
         try {
-            
-            const LARGE_FILE_THRESHOLD = 2 * 1024 * 1024 * 1024; 
-            const isLargeFile = file.size >= LARGE_FILE_THRESHOLD;
-            
-            if (isLargeFile) {
-                showLoading('Analyzing file (large file mode)...');
-                console.log('Large file detected (>= 2GB), using direct playback mode...');
-                
-                
-                await FFmpegHandler.loadFFmpeg((msg) => showLoading(msg));
-                const { videoStreams, audioStreams, subtitleStreams } = await analyzeFileStreams(file);
-                
-                
-                const hasHevc = videoStreams.some(v => 
-                    v.codec === 'hevc' || v.codec === 'h265' || v.codec === 'h.265'
-                );
-                
-                if (hasHevc) {
-                    hideLoading();
-                    alert(
-                        `This file uses HEVC/H.265 video codec and is ${(file.size / 1024 / 1024 / 1024).toFixed(1)} GB.\n\n` +
-                        `HEVC files larger than 2GB cannot be converted in the browser due to memory limits.\n\n` +
-                        `Options:\n` +
-                        `1. Use a smaller HEVC file (< 2GB)\n` +
-                        `2. Convert to H.264 using desktop FFmpeg or HandBrake`
-                    );
-                    return;
-                }
-                
-                const directUrl = URL.createObjectURL(file);
-                
-                
-                showLoading('Testing direct playback...');
-                const canPlay = await testVideoPlayback(directUrl, 5000);
-                
-                if (canPlay) {
-                    console.log('Direct playback successful!');
-                    
-                    // Check if ALL audio tracks are unsupported
-                    const allAudioUnsupported = audioStreams.length > 0 && 
-                        audioStreams.every(a => FFmpegHandler.isAudioCodecUnsupported(a.codec));
-                    
-                    // Show warning if audio is unsupported
-                    if (allAudioUnsupported) {
-                        const defaultAudioTrack = audioStreams[0];
-                        const audioCodec = defaultAudioTrack?.codec?.toUpperCase() || 'Unknown';
-                        console.warn(`Audio codec ${audioCodec} is not supported by browser`);
-                        
-                        // Show warning but continue with video playback
-                        setTimeout(() => {
-                            alert(
-                                `⚠️ Audio format "${audioCodec}" is not supported by your browser.\n\n` +
-                                `The video will play without sound.\n\n` +
-                                `To get audio, convert the file using FFmpeg:\n` +
-                                `ffmpeg -i input.mkv -c:v copy -c:a aac output.mkv`
-                            );
-                        }, 500);
-                    }
-                    
-                    // Use direct playback
-                    video.src = directUrl;
-                    
-                    processedMkvData = {
-                        videoUrl: directUrl,
-                        videoCodec: videoStreams[0]?.codec || 'h264',
-                        audioTracks: audioStreams.map((track, i) => ({
-                            index: i,
-                            label: track.language || `Audio ${i + 1}`,
-                            language: track.language || "und",
-                            codec: track.codec,
-                            unsupported: FFmpegHandler.isAudioCodecUnsupported(track.codec),
-                        })),
-                        subtitleStreams: subtitleStreams.map((stream, i) => ({
-                            index: i,
-                            label: stream.language || `Track ${i + 1}`,
-                            language: stream.language || "und",
-                            codec: stream.codec,
-                            isBitmap: stream.isBitmap || false,
-                            extracted: false,
-                        })),
-                        subtitles: [],
-                        originalFile: file,
-                        isDirectPlayback: true,
-                    };
-                    
-                    
-                    if (subtitleStreams.length > 0) {
-                        populateSubtitleSelectorLazy(processedMkvData.subtitleStreams);
-                        document.getElementById('subtitle-selector-container').style.display = '';
-                    } else {
-                        document.getElementById('subtitle-selector-container').style.display = 'none';
-                    }
-                    
-                    // Show audio selector if there are multiple tracks
-                    if (audioStreams.length > 1) {
-                        populateAudioSelectorWithCodecs(processedMkvData.audioTracks);
-                        document.getElementById('audio-selector-container').style.display = '';
-                    } else {
-                        document.getElementById('audio-selector-container').style.display = 'none';
-                    }
-                    
-                    hideLoading();
-                    try {
-                        await video.play();
-                    } catch (e) {
-                        console.log('Autoplay prevented');
-                    }
-                    return;
-                } else {
-                    
-                    URL.revokeObjectURL(directUrl);
-                    hideLoading();
-                    alert(
-                        `This ${(file.size / 1024 / 1024 / 1024).toFixed(1)} GB file cannot be played directly by your browser.\n\n` +
-                        `Files >= 2GB cannot be converted in the browser due to memory limits.\n\n` +
-                        `Please convert to a browser-compatible format (H.264 MP4) using desktop FFmpeg or HandBrake.`
-                    );
-                    return;
-                }
-            }
-            
-            showLoading('Loading FFmpeg...');
+            showLoading('Opening video...');
+            const canPlayDirectly = await tryVideoSource(directUrl, 2500);
 
-            
-            const support = FFmpegHandler.checkSupport();
-            console.log('FFmpeg support check:', support);
-            
-            if (!support.crossOriginIsolated) {
-                throw new Error('Cross-Origin Isolation is not enabled. Please make sure you are running the server with: node server.js');
+            if (!isCurrentLoad(loadId)) {
+                URL.revokeObjectURL(directUrl);
+                return;
             }
 
-            
-            processedMkvData = await FFmpegHandler.processMkvFile(file, (msg) => {
-                showLoading(msg);
-            });
-
-            
-            video.src = processedMkvData.videoUrl;
-
-            
-            if (processedMkvData.audioTracks.length > 1) {
-                populateAudioSelector(processedMkvData.audioTracks);
-                document.getElementById('audio-selector-container').style.display = '';
-            } else {
-                document.getElementById('audio-selector-container').style.display = 'none';
+            if (canPlayDirectly) {
+                currentVideoUrl = directUrl;
+                processedMkvData = createMkvData(file, directUrl, {
+                    isDirectPlayback: true,
+                    videoCodec: 'h264',
+                });
+                hideLoading();
+                playWhenAllowed();
+                analyzeMkvInBackground(file, loadId, true);
+                return;
             }
 
-            
-            if (processedMkvData.subtitleStreams && processedMkvData.subtitleStreams.length > 0) {
-                populateSubtitleSelectorLazy(processedMkvData.subtitleStreams);
-                document.getElementById('subtitle-selector-container').style.display = '';
-            } else {
-                document.getElementById('subtitle-selector-container').style.display = 'none';
-            }
-
-            hideLoading();
-
-            
-            try {
-                await video.play();
-            } catch (e) {
-                console.log('Autoplay prevented, user interaction required');
-            }
-
+            clearVideoSource();
+            URL.revokeObjectURL(directUrl);
+            await loadMkvFallback(file, loadId);
         } catch (error) {
+            URL.revokeObjectURL(directUrl);
             console.error('Error loading MKV:', error);
             hideLoading();
-            alert('Error processing MKV file: ' + error.message);
-            goBack();
+            showStatus('MKV playback failed', error.message, 'error');
         }
     }
 
-    
+
+    async function loadMkvFallback(file, loadId) {
+        showLoading('Analyzing MKV...');
+
+        const support = FFmpegHandler.checkSupport();
+        if (!support.crossOriginIsolated) {
+            throw new Error('Cross-Origin Isolation is not enabled. Run this app with: node server.js');
+        }
+
+        await FFmpegHandler.loadFFmpeg((msg) => showLoading(msg));
+        const probe = await FFmpegHandler.analyzeStreams(file, (msg) => showLoading(msg));
+
+        if (!isCurrentLoad(loadId)) return;
+
+        const strategy = FFmpegHandler.choosePlaybackStrategy({
+            container: 'mkv',
+            videoStreams: probe.videoStreams,
+            audioStreams: probe.audioStreams,
+            subtitleStreams: probe.subtitleStreams,
+        }, {
+            directPlaybackWorks: false,
+            mediaSourceSupported: isMediaSourceAvailable(),
+        });
+
+        if (strategy.mode === 'unsupported') {
+            hideLoading();
+            showUnsupportedStrategy(strategy, file);
+            return;
+        }
+
+        if (strategy.mode === 'mse-remux') {
+            try {
+                await loadMseRemux(file, probe, loadId);
+                return;
+            } catch (mseError) {
+                console.warn('MSE remux failed, falling back to full remux:', mseError);
+                await cleanupMsePlayback();
+                clearVideoSource();
+                showStatus(
+                    'Streaming remux failed',
+                    'Falling back to a full MP4 remux. Startup will be slower for this file.',
+                    'warning'
+                );
+            }
+        }
+
+        await loadFullRemuxFallback(file, loadId);
+    }
+
+
+    async function loadFullRemuxFallback(file, loadId) {
+        showLoading('Converting to MP4...');
+        processedMkvData = await FFmpegHandler.processMkvFile(file, (msg) => {
+            showLoading(msg);
+        });
+
+        if (!isCurrentLoad(loadId)) return;
+
+        setVideoUrl(processedMkvData.videoUrl);
+        applyMkvTrackData(processedMkvData);
+        hideLoading();
+        playWhenAllowed();
+    }
+
+
     async function loadDirectFile(file) {
         showLoading('Loading video...');
 
-        
-        const url = URL.createObjectURL(file);
-        video.src = url;
 
-        
+        const url = URL.createObjectURL(file);
+        setVideoUrl(url);
+
+
         document.getElementById('subtitle-selector-container').style.display = 'none';
         document.getElementById('audio-selector-container').style.display = 'none';
 
-        
+
         try {
             await video.play();
         } catch (e) {
-            console.log('Autoplay prevented, user interaction required');
+        } finally {
             hideLoading();
         }
     }
 
-    
+
+    async function cleanupCurrentPlayback() {
+        activeLoadId++;
+        hideLoading();
+        hideStatus();
+        PGSRenderer.stop();
+        SubtitleRenderer.clearTracks();
+        await cleanupMsePlayback();
+
+        video.pause();
+        clearVideoSource();
+        revokeCurrentVideoUrl();
+
+        currentFile = null;
+        processedMkvData = null;
+    }
+
+
+    function setVideoUrl(url) {
+        if (currentVideoUrl && currentVideoUrl !== url) {
+            URL.revokeObjectURL(currentVideoUrl);
+        }
+
+        currentVideoUrl = url;
+        video.src = url;
+    }
+
+
+    function clearVideoSource() {
+        video.removeAttribute('src');
+        video.load();
+    }
+
+
+    function revokeCurrentVideoUrl() {
+        if (currentVideoUrl) {
+            URL.revokeObjectURL(currentVideoUrl);
+            currentVideoUrl = null;
+        }
+    }
+
+
+    function isCurrentLoad(loadId) {
+        return loadId === activeLoadId && !!currentFile;
+    }
+
+
+    function tryVideoSource(url, timeout = 2500) {
+        return new Promise((resolve) => {
+            let settled = false;
+            suppressVideoErrors = true;
+
+            const cleanup = () => {
+                video.removeEventListener('loadedmetadata', onLoaded);
+                video.removeEventListener('error', onError);
+                clearTimeout(timer);
+                suppressVideoErrors = false;
+            };
+
+            const finish = (result) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(result);
+            };
+
+            const onLoaded = () => finish(true);
+            const onError = () => finish(false);
+            const timer = setTimeout(() => finish(false), timeout);
+
+            video.addEventListener('loadedmetadata', onLoaded);
+            video.addEventListener('error', onError);
+            video.src = url;
+            video.load();
+        });
+    }
+
+
+    async function playWhenAllowed() {
+        try {
+            await video.play();
+        } catch (e) {
+        }
+    }
+
+
+    function createMkvData(file, videoUrl, overrides = {}) {
+        return {
+            videoUrl,
+            videoCodec: overrides.videoCodec || 'unknown',
+            audioTracks: [],
+            subtitleStreams: [],
+            subtitles: [],
+            originalFile: file,
+            isDirectPlayback: !!overrides.isDirectPlayback,
+            isMsePlayback: !!overrides.isMsePlayback,
+        };
+    }
+
+
+    function normalizeAudioTracks(audioStreams) {
+        return audioStreams.map((track, i) => ({
+            index: i,
+            label: track.language || `Audio ${i + 1}`,
+            language: track.language || 'und',
+            codec: track.codec,
+            unsupported: FFmpegHandler.isAudioCodecUnsupported(track.codec),
+        }));
+    }
+
+
+    function normalizeSubtitleStreams(subtitleStreams) {
+        return subtitleStreams.map((stream, i) => ({
+            index: i,
+            label: stream.language || `Track ${i + 1}`,
+            language: stream.language || 'und',
+            codec: stream.codec,
+            isBitmap: stream.isBitmap || false,
+            isPgs: stream.isPgs || FFmpegHandler.isPgsSubtitle(stream.codec),
+            extracted: false,
+        }));
+    }
+
+
+    function applyMkvTrackData(data) {
+        if (data.audioTracks.length > 1) {
+            populateAudioSelectorWithCodecs(data.audioTracks);
+            document.getElementById('audio-selector-container').style.display = '';
+        } else {
+            document.getElementById('audio-selector-container').style.display = 'none';
+        }
+
+        if (data.subtitleStreams && data.subtitleStreams.length > 0) {
+            populateSubtitleSelectorLazy(data.subtitleStreams);
+            document.getElementById('subtitle-selector-container').style.display = '';
+        } else {
+            document.getElementById('subtitle-selector-container').style.display = 'none';
+        }
+    }
+
+
+    async function analyzeMkvInBackground(file, loadId, directPlaybackWorks) {
+        showStatus(
+            'Reading tracks',
+            'Video playback has started. Audio and subtitle track details are loading in the background.',
+            'info'
+        );
+
+        try {
+            await FFmpegHandler.loadFFmpeg((msg) => {
+                if (isCurrentLoad(loadId)) {
+                    showStatus('Reading tracks', msg, 'info');
+                }
+            });
+
+            const probe = await FFmpegHandler.analyzeStreams(file, (msg) => {
+                if (isCurrentLoad(loadId)) {
+                    showStatus('Reading tracks', msg, 'info');
+                }
+            });
+
+            if (!isCurrentLoad(loadId) || !processedMkvData) return;
+
+            const videoCodec = probe.videoStreams[0]?.codec || 'unknown';
+            const strategy = FFmpegHandler.choosePlaybackStrategy({
+                container: 'mkv',
+                videoStreams: probe.videoStreams,
+                audioStreams: probe.audioStreams,
+                subtitleStreams: probe.subtitleStreams,
+            }, {
+                directPlaybackWorks,
+                mediaSourceSupported: isMediaSourceAvailable(),
+            });
+
+            processedMkvData.videoCodec = videoCodec;
+            processedMkvData.audioTracks = normalizeAudioTracks(probe.audioStreams);
+            processedMkvData.subtitleStreams = normalizeSubtitleStreams(probe.subtitleStreams);
+            applyMkvTrackData(processedMkvData);
+
+            const unsupportedAudio = processedMkvData.audioTracks.filter(track => track.unsupported);
+            if (strategy.reason === 'hevc-deferred') {
+                showStatus(
+                    'H.265/x265 detected',
+                    'This browser is playing the file directly, but x265 support is not the optimized path yet. H.264/x264 remains the primary target.',
+                    'warning'
+                );
+            } else if (unsupportedAudio.length > 0) {
+                showStatus(
+                    'Some audio may be unavailable',
+                    `Unsupported browser audio codec detected: ${unsupportedAudio.map(t => (t.codec || 'unknown').toUpperCase()).join(', ')}.`,
+                    'warning'
+                );
+            } else {
+                hideStatus();
+            }
+        } catch (error) {
+            if (!isCurrentLoad(loadId)) return;
+            console.warn('Background MKV analysis failed:', error);
+            showStatus(
+                'Track reading failed',
+                'The video can keep playing, but embedded audio/subtitle track details could not be loaded.',
+                'warning'
+            );
+        }
+    }
+
+
+    function isMediaSourceAvailable() {
+        return typeof MediaSource !== 'undefined' && typeof MediaSource.isTypeSupported === 'function';
+    }
+
+
+    function getMseMimeType() {
+        if (!isMediaSourceAvailable()) return null;
+
+        const candidates = [
+            'video/mp4; codecs="avc1.640028, mp4a.40.2"',
+            'video/mp4; codecs="avc1.4d401f, mp4a.40.2"',
+            'video/mp4; codecs="avc1.42e01e, mp4a.40.2"',
+            'video/mp4'
+        ];
+
+        return candidates.find(type => MediaSource.isTypeSupported(type)) || null;
+    }
+
+
+    async function loadMseRemux(file, probe, loadId) {
+        const mimeType = getMseMimeType();
+        if (!mimeType) {
+            throw new Error('Media Source Extensions are not available for H.264/AAC MP4 on this browser.');
+        }
+
+        showLoading('Preparing streaming remux...');
+        await cleanupMsePlayback();
+
+        const mediaSource = new MediaSource();
+        const mseUrl = URL.createObjectURL(mediaSource);
+        const abortController = new AbortController();
+        const audioTrackIndex = 0;
+        const videoCodec = probe.videoStreams[0]?.codec || 'h264';
+
+        mseState = {
+            mediaSource,
+            url: mseUrl,
+            sourceBuffer: null,
+            abortController,
+            segmentDuration: 20,
+            nextStart: 0,
+            pumping: false,
+            ended: false,
+            onTimeUpdate: null,
+        };
+
+        setVideoUrl(mseUrl);
+
+        await new Promise((resolve, reject) => {
+            mediaSource.addEventListener('sourceopen', resolve, { once: true });
+            mediaSource.addEventListener('error', () => reject(new Error('MediaSource failed to open')), { once: true });
+        });
+
+        if (!isCurrentLoad(loadId)) return;
+
+        const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+        mseState.sourceBuffer = sourceBuffer;
+
+        const initSegment = await FFmpegHandler.generateInitSegment(file, audioTrackIndex, videoCodec, (msg) => showLoading(msg));
+        await appendMseBuffer(sourceBuffer, initSegment);
+
+        const firstSegment = await FFmpegHandler.generateSegment(
+            file,
+            0,
+            mseState.segmentDuration,
+            audioTrackIndex,
+            videoCodec,
+            (msg) => showLoading(msg),
+            abortController.signal
+        );
+
+        if (!firstSegment) {
+            throw new Error('No playable media segment was produced.');
+        }
+
+        await appendMseBuffer(sourceBuffer, firstSegment);
+        mseState.nextStart = mseState.segmentDuration;
+
+        processedMkvData = createMkvData(file, mseUrl, {
+            isMsePlayback: true,
+            videoCodec,
+        });
+        processedMkvData.audioTracks = normalizeAudioTracks(probe.audioStreams);
+        processedMkvData.subtitleStreams = normalizeSubtitleStreams(probe.subtitleStreams);
+        applyMkvTrackData(processedMkvData);
+
+        mseState.onTimeUpdate = () => {
+            const bufferedEnd = getBufferedEnd();
+            if (bufferedEnd - video.currentTime < 45) {
+                pumpMseSegments(file, videoCodec, audioTrackIndex, loadId);
+            }
+        };
+        video.addEventListener('timeupdate', mseState.onTimeUpdate);
+
+        hideLoading();
+        playWhenAllowed();
+        pumpMseSegments(file, videoCodec, audioTrackIndex, loadId);
+    }
+
+
+    async function pumpMseSegments(file, videoCodec, audioTrackIndex, loadId) {
+        if (!mseState || mseState.pumping || mseState.ended || !isCurrentLoad(loadId)) return;
+
+        mseState.pumping = true;
+        try {
+            while (
+                mseState &&
+                !mseState.abortController.signal.aborted &&
+                getBufferedEnd() - video.currentTime < 80
+            ) {
+                const segment = await FFmpegHandler.generateSegment(
+                    file,
+                    mseState.nextStart,
+                    mseState.segmentDuration,
+                    audioTrackIndex,
+                    videoCodec,
+                    null,
+                    mseState.abortController.signal
+                );
+
+                if (!segment) {
+                    mseState.ended = true;
+                    if (mseState.mediaSource.readyState === 'open') {
+                        mseState.mediaSource.endOfStream();
+                    }
+                    break;
+                }
+
+                await appendMseBuffer(mseState.sourceBuffer, segment);
+                mseState.nextStart += mseState.segmentDuration;
+            }
+        } catch (error) {
+            if (error.name !== 'AbortError') {
+                console.warn('MSE segment pump failed:', error);
+                showStatus('Streaming remux stopped', error.message, 'warning');
+            }
+        } finally {
+            if (mseState) {
+                mseState.pumping = false;
+            }
+        }
+    }
+
+
+    function appendMseBuffer(sourceBuffer, data) {
+        return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                sourceBuffer.removeEventListener('updateend', onUpdateEnd);
+                sourceBuffer.removeEventListener('error', onError);
+            };
+            const onUpdateEnd = () => {
+                cleanup();
+                resolve();
+            };
+            const onError = () => {
+                cleanup();
+                reject(new Error('SourceBuffer append failed'));
+            };
+
+            sourceBuffer.addEventListener('updateend', onUpdateEnd, { once: true });
+            sourceBuffer.addEventListener('error', onError, { once: true });
+            sourceBuffer.appendBuffer(data);
+        });
+    }
+
+
+    function getBufferedEnd() {
+        if (!video.buffered || video.buffered.length === 0) return 0;
+        return video.buffered.end(video.buffered.length - 1);
+    }
+
+
+    async function cleanupMsePlayback() {
+        if (!mseState) return;
+
+        const state = mseState;
+        mseState = null;
+
+        if (state.onTimeUpdate) {
+            video.removeEventListener('timeupdate', state.onTimeUpdate);
+        }
+
+        state.abortController.abort();
+
+        try {
+            if (state.mediaSource.readyState === 'open') {
+                state.mediaSource.endOfStream();
+            }
+        } catch (e) {}
+
+        try {
+            await FFmpegHandler.unmountMSEFile();
+        } catch (e) {}
+    }
+
+
+    function showUnsupportedStrategy(strategy, file) {
+        if (strategy.reason === 'hevc-deferred') {
+            showStatus(
+                'H.265/x265 is deferred',
+                `${file.name} uses H.265/x265. Browser-side x265 transcode is too slow for the instant-loading goal, so this version focuses on H.264/x264.`,
+                'error'
+            );
+            return;
+        }
+
+        showStatus(
+            'Unsupported video codec',
+            `This file uses ${strategy.videoCodec || 'an unsupported codec'}. H.264/x264 MP4 and MKV are the optimized formats for this version.`,
+            'error'
+        );
+    }
+
+
     function togglePlayPause() {
         if (video.paused) {
             video.play();
@@ -772,14 +1162,14 @@ const VideoPlayer = (function() {
         }
     }
 
-    
+
     function seek(seconds) {
         const newTime = Math.max(0, Math.min(video.duration, video.currentTime + seconds));
         video.currentTime = newTime;
         showControlsTemporarily();
     }
 
-    
+
     function toggleMute() {
         if (video.muted || video.volume === 0) {
             video.muted = false;
@@ -790,7 +1180,7 @@ const VideoPlayer = (function() {
         }
     }
 
-    
+
     function adjustVolume(delta) {
         const newVolume = Math.max(0, Math.min(1, video.volume + delta));
         video.volume = newVolume;
@@ -798,17 +1188,17 @@ const VideoPlayer = (function() {
         showControlsTemporarily();
     }
 
-    
+
     function updateVolumeUI() {
         const isMuted = video.muted || video.volume === 0;
         const volume = video.muted ? 0 : video.volume;
-        
+
         volumeIcon.classList.toggle('hidden', isMuted);
         mutedIcon.classList.toggle('hidden', !isMuted);
         volumeSlider.value = volume;
     }
 
-    
+
     function toggleFullscreen() {
         if (document.fullscreenElement) {
             document.exitFullscreen();
@@ -817,22 +1207,22 @@ const VideoPlayer = (function() {
         }
     }
 
-    
+
     function updateFullscreenUI() {
         const isFullscreen = !!document.fullscreenElement;
         fullscreenIcon.classList.toggle('hidden', isFullscreen);
         exitFullscreenIcon.classList.toggle('hidden', !isFullscreen);
-        
-        
+
+
         if (!isFullscreen) {
             showCursor();
         } else if (!video.paused) {
-            
+
             hideCursorDelayed();
         }
     }
 
-    
+
     function cycleSubtitles() {
         const currentValue = parseInt(subtitleSelect.value);
         const options = subtitleSelect.options;
@@ -850,7 +1240,7 @@ const VideoPlayer = (function() {
         showControlsTemporarily();
     }
 
-    
+
     function updateBufferBar() {
         if (video.buffered.length > 0) {
             const bufferedEnd = video.buffered.end(video.buffered.length - 1);
@@ -859,9 +1249,9 @@ const VideoPlayer = (function() {
         }
     }
 
-    
+
     function populateSubtitleSelector() {
-        
+
         while (subtitleSelect.options.length > 1) {
             subtitleSelect.remove(1);
         }
@@ -875,9 +1265,9 @@ const VideoPlayer = (function() {
         });
     }
 
-    
+
     function populateSubtitleSelectorLazy(subtitleStreams) {
-        
+
         while (subtitleSelect.options.length > 1) {
             subtitleSelect.remove(1);
         }
@@ -886,7 +1276,7 @@ const VideoPlayer = (function() {
             const option = document.createElement('option');
             option.value = index;
             if (stream.isBitmap) {
-                option.textContent = `${stream.label} (PGS)`;
+                option.textContent = stream.isPgs ? `${stream.label} (PGS)` : `${stream.label} (${stream.codec || 'bitmap'})`;
             } else {
                 option.textContent = stream.label;
             }
@@ -894,7 +1284,7 @@ const VideoPlayer = (function() {
         });
     }
 
-    
+
     function populateAudioSelector(audioTracks) {
         audioSelect.innerHTML = '';
 
@@ -924,24 +1314,46 @@ const VideoPlayer = (function() {
         });
     }
 
-    
+
     function resetTrackSelectors() {
         subtitleSelect.innerHTML = '<option value="-1">Off</option>';
         audioSelect.innerHTML = '<option value="0">Default</option>';
     }
 
-    
+
     function showLoading(message) {
         loadingText.textContent = message || 'Loading...';
         loadingOverlay.classList.remove('hidden');
     }
 
-    
+
     function hideLoading() {
         loadingOverlay.classList.add('hidden');
     }
 
-    
+
+    function showStatus(title, message, type = 'info') {
+        if (!statusPanel) return;
+
+        statusTitle.textContent = title || '';
+        statusMessage.textContent = message || '';
+        statusPanel.classList.remove('hidden', 'status-warning', 'status-error');
+
+        if (type === 'warning') {
+            statusPanel.classList.add('status-warning');
+        } else if (type === 'error') {
+            statusPanel.classList.add('status-error');
+        }
+    }
+
+
+    function hideStatus() {
+        if (statusPanel) {
+            statusPanel.classList.add('hidden');
+        }
+    }
+
+
     function showControlsTemporarily() {
         playerContainer.classList.add('controls-visible');
         isControlsVisible = true;
@@ -955,7 +1367,7 @@ const VideoPlayer = (function() {
         }
     }
 
-    
+
     function hideControlsDelayed() {
         controlsTimeout = setTimeout(() => {
             if (!video.paused) {
@@ -965,7 +1377,7 @@ const VideoPlayer = (function() {
         }, 3000);
     }
 
-    
+
     function formatTime(seconds) {
         if (isNaN(seconds)) return '0:00';
 
@@ -979,139 +1391,19 @@ const VideoPlayer = (function() {
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     }
 
-    
-    function goBack() {
-        
-        video.pause();
-        video.src = '';
 
-        
-        if (processedMkvData && processedMkvData.videoUrl) {
-            URL.revokeObjectURL(processedMkvData.videoUrl);
-        }
+    async function goBack() {
+        await cleanupCurrentPlayback();
 
-        
-        currentFile = null;
-        processedMkvData = null;
-        SubtitleRenderer.clearTracks();
-        PGSRenderer.stop();
-
-        
         document.getElementById('drop-zone').classList.remove('hidden');
         playerContainer.classList.add('hidden');
     }
 
-    
-    async function analyzeFileStreams(file) {
-        const CHUNK_SIZE = 10 * 1024 * 1024;
-        const ffmpeg = await FFmpegHandler.loadFFmpeg();
-        
-        // Use 10MB chunk for fast analysis
-        const inputPath = "analysis" + file.name.substring(file.name.lastIndexOf('.'));
-        const chunkSize = Math.min(file.size, CHUNK_SIZE);
-        const chunk = file.slice(0, chunkSize);
-        const chunkData = await chunk.arrayBuffer();
-        await ffmpeg.writeFile(inputPath, new Uint8Array(chunkData));
-        
-        let logOutput = "";
-        const logHandler = ({ message }) => {
-            logOutput += message + "\n";
-        };
-        ffmpeg.on("log", logHandler);
-        
-        try {
-            await ffmpeg.exec(["-i", inputPath, "-f", "null", "-"]);
-        } catch (e) {
-            // FFmpeg returns error when no output, but logs have stream info
-        }
-        
-        ffmpeg.off("log", logHandler);
-        await ffmpeg.deleteFile(inputPath);
-        
-        // Parse stream information
-        const videoStreams = [];
-        const audioStreams = [];
-        const subtitleStreams = [];
-        const lines = logOutput.split("\n");
-        
-        for (const line of lines) {
-            const streamMatch = line.match(
-                /Stream #(\d+):(\d+)(?:\[0x[a-f0-9]+\])?(?:\((\w+)\))?.*?: (Video|Audio|Subtitle): ([^,\n(]+)/i
-            );
-            
-            if (streamMatch) {
-                const [, fileIdx, streamIdx, language, type, codecInfo] = streamMatch;
-                const codec = codecInfo.trim().split(" ")[0].toLowerCase();
-                
-                if (type.toLowerCase() === "video") {
-                    videoStreams.push({
-                        index: videoStreams.length,
-                        codec: codec,
-                    });
-                } else if (type.toLowerCase() === "audio") {
-                    audioStreams.push({
-                        index: audioStreams.length,
-                        language: language || "und",
-                        codec: codec,
-                    });
-                } else if (type.toLowerCase() === "subtitle") {
-                    const bitmapCodecs = ['hdmv_pgs_subtitle', 'pgssub', 'pgs', 'dvd_subtitle', 'dvdsub', 'dvb_subtitle', 'dvbsub', 'xsub'];
-                    const isBitmap = bitmapCodecs.some(c => codec.includes(c));
-                    
-                    subtitleStreams.push({
-                        index: subtitleStreams.length,
-                        language: language || "und",
-                        codec: codec,
-                        isBitmap: isBitmap,
-                    });
-                }
-            }
-        }
-        
-        console.log(`[analyzeFileStreams] Found: ${videoStreams.length} video, ${audioStreams.length} audio, ${subtitleStreams.length} subtitle`);
-        
-        return { videoStreams, audioStreams, subtitleStreams };
-    }
-
-    
-    function testVideoPlayback(url, timeout = 5000) {
-        return new Promise((resolve) => {
-            const testVideo = document.createElement('video');
-            testVideo.muted = true;
-            testVideo.preload = 'metadata';
-            
-            const cleanup = () => {
-                testVideo.src = '';
-                testVideo.load();
-            };
-            
-            const timer = setTimeout(() => {
-                cleanup();
-                resolve(false);
-            }, timeout);
-            
-            testVideo.onloadedmetadata = () => {
-                clearTimeout(timer);
-                cleanup();
-                resolve(true);
-            };
-            
-            testVideo.onerror = () => {
-                clearTimeout(timer);
-                cleanup();
-                resolve(false);
-            };
-            
-            testVideo.src = url;
-        });
-    }
-
-    
     function getVideoElement() {
         return video;
     }
 
-    
+
     return {
         init,
         loadFile,
@@ -1123,6 +1415,8 @@ const VideoPlayer = (function() {
         cycleSubtitles,
         showLoading,
         hideLoading,
+        showStatus,
+        hideStatus,
         goBack,
         getVideoElement
     };

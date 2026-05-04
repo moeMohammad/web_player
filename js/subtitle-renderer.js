@@ -8,13 +8,18 @@ const SubtitleRenderer = (function() {
     let subtitleTracks = [];  
     let activeTrackIndex = -1;
     let updateInterval = null;
+    const DEBUG = false;
+
+    function debug(...args) {
+        if (DEBUG) console.log(...args);
+    }
 
     
     function init(videoElement, overlayElement) {
         video = videoElement;
         subtitleOverlay = overlayElement;
         
-        console.log('[SubtitleRenderer] Initialized with video:', !!video, 'overlay:', !!subtitleOverlay);
+        debug('[SubtitleRenderer] Initialized with video:', !!video, 'overlay:', !!subtitleOverlay);
         
         
         if (updateInterval) clearInterval(updateInterval);
@@ -248,18 +253,18 @@ const SubtitleRenderer = (function() {
             vttContent
         });
         
-        console.log(`[SubtitleRenderer] Added track "${label}" with ${cues.length} cues`);
+        debug(`[SubtitleRenderer] Added track "${label}" with ${cues.length} cues`);
         return subtitleTracks.length - 1;
     }
 
     
     function enableTrack(index) {
-        console.log('[SubtitleRenderer] Enabling track:', index, 'of', subtitleTracks.length, 'tracks');
+        debug('[SubtitleRenderer] Enabling track:', index, 'of', subtitleTracks.length, 'tracks');
         
         if (index >= 0 && index < subtitleTracks.length) {
             activeTrackIndex = index;
             const track = subtitleTracks[index];
-            console.log('[SubtitleRenderer] Track has', track.cues.length, 'cues');
+            debug('[SubtitleRenderer] Track has', track.cues.length, 'cues');
             updateSubtitleDisplay();
         } else {
             console.warn('[SubtitleRenderer] Invalid track index:', index);
@@ -294,17 +299,11 @@ const SubtitleRenderer = (function() {
         if (!video || activeTrackIndex < 0 || !subtitleTracks[activeTrackIndex]) {
             return;
         }
-        
-        const currentTime = video.currentTime;
         const track = subtitleTracks[activeTrackIndex];
-        
-        
-        const activeCues = track.cues.filter(cue => 
-            currentTime >= cue.startTime && currentTime <= cue.endTime
-        );
-        
-        if (activeCues.length > 0) {
-            const text = activeCues.map(cue => cue.text).join('\n');
+
+        const text = getActiveCueText(track.cues, video.currentTime);
+
+        if (text) {
             displaySubtitle(text);
         } else {
             
@@ -321,30 +320,90 @@ const SubtitleRenderer = (function() {
         }
         
         if (!text) {
-            subtitleOverlay.innerHTML = '';
+            replaceChildren(subtitleOverlay);
             return;
         }
         
         
-        let cleanText = text
+        const cleanText = decodeSubtitleEntities(text
             .replace(/<\/?[^>]+(>|$)/g, '')  
             .replace(/&lt;/g, '<')
             .replace(/&gt;/g, '>')
-            .replace(/&amp;/g, '&');
+            .replace(/&amp;/g, '&'));
         
         const subtitleEl = document.createElement('div');
         subtitleEl.className = 'subtitle-text';
-        subtitleEl.innerHTML = cleanText.replace(/\n/g, '<br>');
-        
-        subtitleOverlay.innerHTML = '';
-        subtitleOverlay.appendChild(subtitleEl);
+
+        const lines = cleanText.split('\n');
+        lines.forEach((line, index) => {
+            if (index > 0) {
+                subtitleEl.appendChild(document.createElement('br'));
+            }
+            subtitleEl.appendChild(document.createTextNode(line));
+        });
+
+        replaceChildren(subtitleOverlay, subtitleEl);
     }
 
     
     function hideSubtitle() {
         if (subtitleOverlay) {
-            subtitleOverlay.innerHTML = '';
+            replaceChildren(subtitleOverlay);
         }
+    }
+
+    function getActiveCueText(cues, currentTime) {
+        if (!Array.isArray(cues) || cues.length === 0 || !Number.isFinite(currentTime)) {
+            return '';
+        }
+
+        let low = 0;
+        let high = cues.length - 1;
+        let latestStartedIndex = -1;
+
+        while (low <= high) {
+            const mid = Math.floor((low + high) / 2);
+            if (cues[mid].startTime <= currentTime) {
+                latestStartedIndex = mid;
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        if (latestStartedIndex === -1) {
+            return '';
+        }
+
+        const active = [];
+        for (let i = latestStartedIndex; i >= 0; i--) {
+            const cue = cues[i];
+            if (cue.endTime < currentTime) {
+                break;
+            }
+            if (currentTime >= cue.startTime && currentTime <= cue.endTime) {
+                active.push(cue.text);
+            }
+        }
+
+        return active.reverse().join('\n');
+    }
+
+    function decodeSubtitleEntities(text) {
+        return text
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&apos;/g, "'");
+    }
+
+    function replaceChildren(element, ...children) {
+        if (typeof element.replaceChildren === 'function') {
+            element.replaceChildren(...children);
+            return;
+        }
+
+        element.innerHTML = '';
+        children.forEach(child => element.appendChild(child));
     }
 
     return {
@@ -355,6 +414,7 @@ const SubtitleRenderer = (function() {
         addTrack,
         enableTrack,
         disableAllTracks,
+        getActiveCueText,
         getTracks,
         clearTracks,
         displaySubtitle,

@@ -10,6 +10,11 @@ const PGSRenderer = (function() {
     let animationFrame = null;
     let videoWidth = 1920;
     let videoHeight = 1080;
+    const DEBUG = false;
+
+    function debug(...args) {
+        if (DEBUG) console.log(...args);
+    }
 
     function init(videoElement, canvasElement) {
         video = videoElement;
@@ -24,7 +29,7 @@ const PGSRenderer = (function() {
             setTimeout(updateCanvasSize, 100);
         });
         
-        console.log('[PGSRenderer] Initialized');
+        debug('[PGSRenderer] Initialized');
     }
 
     function getVideoDisplayArea() {
@@ -79,7 +84,7 @@ const PGSRenderer = (function() {
         
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         
-        console.log(`[PGSRenderer] Canvas resized: ${rect.width}x${rect.height} (dpr: ${dpr})`);
+        debug(`[PGSRenderer] Canvas resized: ${rect.width}x${rect.height} (dpr: ${dpr})`);
         
         if (currentSubtitle && isActive) {
             renderSubtitle(currentSubtitle);
@@ -89,13 +94,14 @@ const PGSRenderer = (function() {
         try {
             subtitles = PGSParser.parse(supData);
             subtitles = PGSParser.setEndTimes(subtitles, videoDuration || Infinity);
+            subtitles.sort((a, b) => a.startTime - b.startTime);
             
             if (subtitles.length > 0 && subtitles[0].width) {
                 videoWidth = subtitles[0].width;
                 videoHeight = subtitles[0].height;
             }
             
-            console.log(`[PGSRenderer] Loaded ${subtitles.length} PGS subtitles`);
+            debug(`[PGSRenderer] Loaded ${subtitles.length} PGS subtitles`);
             return subtitles.length;
         } catch (e) {
             console.error('[PGSRenderer] Failed to parse PGS:', e);
@@ -108,7 +114,7 @@ const PGSRenderer = (function() {
         isActive = true;
         updateCanvasSize();
         tick();
-        console.log('[PGSRenderer] Started');
+        debug('[PGSRenderer] Started');
     }
 
     function stop() {
@@ -118,7 +124,7 @@ const PGSRenderer = (function() {
             animationFrame = null;
         }
         clear();
-        console.log('[PGSRenderer] Stopped');
+        debug('[PGSRenderer] Stopped');
     }
 
     function clear() {
@@ -148,11 +154,32 @@ const PGSRenderer = (function() {
     }
 
     function findSubtitle(time) {
-        for (const sub of subtitles) {
+        let low = 0;
+        let high = subtitles.length - 1;
+        let latestStartedIndex = -1;
+
+        while (low <= high) {
+            const mid = Math.floor((low + high) / 2);
+            if (subtitles[mid].startTime <= time) {
+                latestStartedIndex = mid;
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        if (latestStartedIndex === -1) {
+            return null;
+        }
+
+        for (let i = latestStartedIndex; i >= 0; i--) {
+            const sub = subtitles[i];
+            if (sub.endTime < time) break;
             if (time >= sub.startTime && time < sub.endTime) {
                 return sub;
             }
         }
+
         return null;
     }
 
@@ -165,7 +192,7 @@ const PGSRenderer = (function() {
         const expectedWidth = Math.round(rect.width * dpr);
         const expectedHeight = Math.round(rect.height * dpr);
         if (canvas.width !== expectedWidth || canvas.height !== expectedHeight) {
-            console.log(`[PGSRenderer] Canvas size mismatch, resizing from ${canvas.width}x${canvas.height} to ${expectedWidth}x${expectedHeight}`);
+            debug(`[PGSRenderer] Canvas size mismatch, resizing from ${canvas.width}x${canvas.height} to ${expectedWidth}x${expectedHeight}`);
             updateCanvasSize();
         }
         
@@ -177,7 +204,7 @@ const PGSRenderer = (function() {
         const subWidth = subtitle.width || videoWidth;
         const subHeight = subtitle.height || videoHeight;
         
-        console.log(`[PGSRenderer] Rendering: sub ${subWidth}x${subHeight}, display ${Math.round(displayArea.width)}x${Math.round(displayArea.height)} at (${Math.round(displayArea.x)},${Math.round(displayArea.y)}), canvas ${Math.round(rect.width)}x${Math.round(rect.height)}`);
+        debug(`[PGSRenderer] Rendering: sub ${subWidth}x${subHeight}, display ${Math.round(displayArea.width)}x${Math.round(displayArea.height)} at (${Math.round(displayArea.x)},${Math.round(displayArea.y)}), canvas ${Math.round(rect.width)}x${Math.round(rect.height)}`);
         
         const scaleX = displayArea.width / subWidth;
         const scaleY = displayArea.height / subHeight;
@@ -188,49 +215,42 @@ const PGSRenderer = (function() {
                 console.warn(`[PGSRenderer] Image data size mismatch: got ${img.imageData.length}, expected ${expectedSize}`);
             }
             
-            const linePixelCounts = [];
-            let totalOpaquePixels = 0;
-            for (let line = 0; line < img.height; line++) {
-                let count = 0;
-                for (let px = 0; px < img.width; px++) {
-                    const idx = (line * img.width + px) * 4 + 3;
-                    if (img.imageData[idx] > 0) count++;
-                }
-                linePixelCounts.push(count);
-                totalOpaquePixels += count;
-            }
-            
-            const finalImageData = new ImageData(new Uint8ClampedArray(img.imageData), img.width, img.height);
-            const finalWidth = img.width;
-            const finalHeight = img.height;
-            
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = finalWidth;
-            tempCanvas.height = finalHeight;
-            const tempCtx = tempCanvas.getContext('2d');
-            tempCtx.putImageData(finalImageData, 0, 0);
+            const drawable = getDrawableImage(img);
             
             const destX = displayArea.x + (img.x * scaleX);
             const destY = displayArea.y + (img.y * scaleY);
-            const destW = finalWidth * scaleX;
-            const destH = finalHeight * scaleY;
-            
-            let finalOpaquePixels = 0;
-            const finalData = finalImageData.data;
-            for (let p = 3; p < finalData.length; p += 4) {
-                if (finalData[p] > 0) finalOpaquePixels++;
-            }
-            
-            const clipWarning = (destY + destH > rect.height) ? ' [CLIPPED!]' : '';
-            
-            console.log(`[PGSRenderer] Drawing ${img.width}x${img.height} at src(${img.x},${img.y}) -> dest(${Math.round(destX)},${Math.round(destY)}) size ${Math.round(destW)}x${Math.round(destH)}, opaque: ${finalOpaquePixels}${clipWarning}`);
+            const destW = drawable.width * scaleX;
+            const destH = drawable.height * scaleY;
             
             const isScaled = Math.abs(scaleX - 1) > 0.01 || Math.abs(scaleY - 1) > 0.01;
             ctx.imageSmoothingEnabled = isScaled;
             ctx.imageSmoothingQuality = 'high';
             
-            ctx.drawImage(tempCanvas, destX, destY, destW, destH);
+            ctx.drawImage(drawable.canvas, destX, destY, destW, destH);
         }
+    }
+
+    function getDrawableImage(img) {
+        if (img._canvas) {
+            return {
+                canvas: img._canvas,
+                width: img._canvas.width,
+                height: img._canvas.height
+            };
+        }
+
+        const imageData = new ImageData(new Uint8ClampedArray(img.imageData), img.width, img.height);
+        const cachedCanvas = document.createElement('canvas');
+        cachedCanvas.width = img.width;
+        cachedCanvas.height = img.height;
+        cachedCanvas.getContext('2d').putImageData(imageData, 0, 0);
+        img._canvas = cachedCanvas;
+
+        return {
+            canvas: cachedCanvas,
+            width: cachedCanvas.width,
+            height: cachedCanvas.height
+        };
     }
 
     function getSubtitleCount() {
@@ -256,4 +276,3 @@ const PGSRenderer = (function() {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = PGSRenderer;
 }
-

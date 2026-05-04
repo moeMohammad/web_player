@@ -18,7 +18,6 @@
 
         setupDragAndDrop();
 
-        console.log('Local Media Player initialized');
     }
 
     function setupFileInput() {
@@ -83,20 +82,6 @@
             return;
         }
 
-        const isMkv = file.name.toLowerCase().endsWith('.mkv');
-        const fileSizeGB = file.size / (1024 * 1024 * 1024);
-        
-        if (isMkv && file.size > 2.5 * 1024 * 1024 * 1024) { 
-            console.log(`Large MKV file: ${fileSizeGB.toFixed(1)} GB - will try direct playback first`);
-        } else if (!isMkv && file.size > 4 * 1024 * 1024 * 1024) { 
-            const proceed = confirm(
-                'This file is larger than 4GB. Playback may be slow. Continue?'
-            );
-            if (!proceed) return;
-        }
-
-        console.log('Loading file:', file.name, 'Size:', formatFileSize(file.size));
-
         VideoPlayer.loadFile(file);
     }
 
@@ -133,4 +118,3 @@
         init();
     }
 })();
-

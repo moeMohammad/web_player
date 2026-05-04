@@ -8,6 +8,12 @@ const PGSParser = (function() {
         WDS: 0x17,
         END: 0x80
     };
+    const DEBUG = false;
+
+    function debug(...args) {
+        if (DEBUG) console.log(...args);
+    }
+
     function parse(buffer) {
         const data = new DataView(buffer);
         const subtitles = [];
@@ -97,7 +103,7 @@ const PGSParser = (function() {
             offset = segmentEnd;
         }
 
-        console.log(`[PGS] Parsed ${subtitles.length} subtitle frames`);
+        debug(`[PGS] Parsed ${subtitles.length} subtitle frames`);
         return subtitles;
     }
 
@@ -133,7 +139,7 @@ const PGSParser = (function() {
             objOffset += (cropped & 0x80) ? 16 : 8;
         }
 
-        console.log(`PGS PCS: screen ${width}x${height}, ${objects.length} objects at positions: ${objects.map(o => `(${o.x},${o.y})`).join(', ')}`);
+        debug(`PGS PCS: screen ${width}x${height}, ${objects.length} objects at positions: ${objects.map(o => `(${o.x},${o.y})`).join(', ')}`);
         
         return {
             width,
@@ -189,7 +195,7 @@ const PGSParser = (function() {
             colorCount++;
         }
         
-        console.log(`PGS: Parsed palette ${paletteId} with ${colorCount} colors`);
+        debug(`PGS: Parsed palette ${paletteId} with ${colorCount} colors`);
         
         return { id: paletteId, data: palette };
     }
@@ -212,7 +218,7 @@ const PGSParser = (function() {
             width = data.getUint16(offset + 7);
             height = data.getUint16(offset + 9);
             rleStart = offset + 11;
-            console.log(`PGS ODS: id=${objectId}, ${width}x${height}, dataLen=${dataLength}, isFirst=${isFirst}, isLast=${isLast}`);
+            debug(`PGS ODS: id=${objectId}, ${width}x${height}, dataLen=${dataLength}, isFirst=${isFirst}, isLast=${isLast}`);
         }
         
         const rleLength = length - (rleStart - offset);
@@ -255,17 +261,18 @@ const PGSParser = (function() {
                 const imageData = decoded.data;
                 const actualHeight = decoded.height;
                 
-                let opaquePixels = 0;
-                for (let p = 3; p < imageData.length; p += 4) {
-                    if (imageData[p] > 0) opaquePixels++;
+                if (DEBUG) {
+                    let opaquePixels = 0;
+                    for (let p = 3; p < imageData.length; p += 4) {
+                        if (imageData[p] > 0) opaquePixels++;
+                    }
+                    debug(`PGS: Decoded object ${compObj.objectId}: ${obj.width}x${actualHeight} (claimed ${obj.height}) at (${compObj.x},${compObj.y}), RLE: ${obj.rleData.length} bytes, opaque pixels: ${opaquePixels}/${obj.width * actualHeight}`);
                 }
-                
+
                 if (actualHeight !== obj.height) {
                     console.warn(`PGS: Object ${compObj.objectId} height mismatch: ODS says ${obj.height}, decoded ${actualHeight}`);
                 }
-                
-                console.log(`PGS: Decoded object ${compObj.objectId}: ${obj.width}x${actualHeight} (claimed ${obj.height}) at (${compObj.x},${compObj.y}), RLE: ${obj.rleData.length} bytes, opaque pixels: ${opaquePixels}/${obj.width * actualHeight}`);
-                
+
                 canvases.push({
                     x: compObj.x,
                     y: compObj.y,
@@ -299,9 +306,7 @@ const PGSParser = (function() {
         let i = 0;
         let pixelsWritten = 0;
         let linesCompleted = 0;
-        
-        const linePixelCounts = new Array(MAX_HEIGHT).fill(0);
-        
+
         while (i < rleData.length && y < MAX_HEIGHT) {
             const byte1 = rleData[i++];
             
@@ -326,7 +331,6 @@ const PGSParser = (function() {
                     const color = rleData[i++];
                     const written = fillPixels(pixels, palette, color, x, y, count, width, MAX_HEIGHT);
                     pixelsWritten += written;
-                    if (y < MAX_HEIGHT) linePixelCounts[y] += written;
                     x += count;
                 } else {
                     if (i + 1 >= rleData.length) break;
@@ -334,13 +338,11 @@ const PGSParser = (function() {
                     const color = rleData[i++];
                     const written = fillPixels(pixels, palette, color, x, y, count, width, MAX_HEIGHT);
                     pixelsWritten += written;
-                    if (y < MAX_HEIGHT) linePixelCounts[y] += written;
                     x += count;
                 }
             } else {
                 const written = fillPixels(pixels, palette, byte1, x, y, 1, width, MAX_HEIGHT);
                 pixelsWritten += written;
-                if (y < MAX_HEIGHT) linePixelCounts[y] += written;
                 x++;
             }
             
@@ -356,12 +358,12 @@ const PGSParser = (function() {
         
         actualHeight = Math.min(actualHeight, MAX_HEIGHT);
 
-        console.log(`PGS RLE: decoded ${linesCompleted} EOLs (claimed=${expectedHeight}, actual=${actualHeight}), wrote ${pixelsWritten} colored pixels, processed ${i}/${rleData.length} bytes`);
+        debug(`PGS RLE: decoded ${linesCompleted} EOLs (claimed=${expectedHeight}, actual=${actualHeight}), wrote ${pixelsWritten} colored pixels, processed ${i}/${rleData.length} bytes`);
         
         if (i < rleData.length) {
              console.warn(`PGS RLE: Still have ${rleData.length - i} bytes after hitting MAX_HEIGHT=${MAX_HEIGHT}. Subtitle may be truncated.`);
         } else if (actualHeight > expectedHeight) {
-            console.log(`PGS RLE: Auto-extended height from ${expectedHeight} to ${actualHeight} to fit content.`);
+            debug(`PGS RLE: Auto-extended height from ${expectedHeight} to ${actualHeight} to fit content.`);
         }
 
         const resultData = pixels.slice(0, width * actualHeight * 4);

@@ -8,6 +8,11 @@ const FFmpegHandler = (function () {
   let isLoading = false;
   let loadPromise = null;
   let currentProgressCallback = null;
+  const DEBUG = false;
+
+  function debug(...args) {
+    if (DEBUG) console.log(...args);
+  }
 
   
   const ANALYSIS_CHUNK_SIZE = 10 * 1024 * 1024;
@@ -88,7 +93,7 @@ const FFmpegHandler = (function () {
 
         
         ffmpeg.on("log", ({ message }) => {
-          console.log("[FFmpeg]", message);
+          debug("[FFmpeg]", message);
         });
 
         
@@ -153,10 +158,14 @@ const FFmpegHandler = (function () {
     "av01",
   ];
 
-  const BITMAP_SUBTITLE_CODECS = [
+  const PGS_SUBTITLE_CODECS = [
     "hdmv_pgs_subtitle",
     "pgssub",
     "pgs",
+  ];
+
+  const BITMAP_SUBTITLE_CODECS = [
+    ...PGS_SUBTITLE_CODECS,
     "dvd_subtitle",
     "dvdsub",
     "dvb_subtitle",
@@ -164,15 +173,135 @@ const FFmpegHandler = (function () {
     "xsub",
   ];
 
+  function normalizeVideoCodec(codec) {
+    const lowerCodec = String(codec || "").toLowerCase();
+
+    if (
+      lowerCodec.includes("hevc") ||
+      lowerCodec.includes("h265") ||
+      lowerCodec.includes("h.265") ||
+      lowerCodec.includes("x265") ||
+      lowerCodec.includes("hev1") ||
+      lowerCodec.includes("hvc1")
+    ) {
+      return "hevc";
+    }
+
+    if (
+      lowerCodec.includes("h264") ||
+      lowerCodec.includes("h.264") ||
+      lowerCodec.includes("x264") ||
+      lowerCodec.includes("avc1") ||
+      lowerCodec === "avc"
+    ) {
+      return "h264";
+    }
+
+    if (lowerCodec.includes("av01") || lowerCodec.includes("av1")) {
+      return "av1";
+    }
+
+    if (lowerCodec.includes("vp9")) return "vp9";
+    if (lowerCodec.includes("vp8")) return "vp8";
+
+    return lowerCodec.split(/[,\s(]/)[0] || "unknown";
+  }
+
+  function normalizeAudioCodec(codec) {
+    const lowerCodec = String(codec || "").toLowerCase();
+
+    if (lowerCodec.includes("mp4a") || lowerCodec.includes("aac")) return "aac";
+    if (lowerCodec.includes("ac-3") || lowerCodec.includes("eac3") || lowerCodec.includes("e-ac-3")) return "eac3";
+    if (lowerCodec.includes("ac3")) return "ac3";
+    if (lowerCodec.includes("dts") || lowerCodec.includes("dca")) return "dts";
+    if (lowerCodec.includes("truehd") || lowerCodec.includes("mlp")) return "truehd";
+    if (lowerCodec.includes("opus")) return "opus";
+    if (lowerCodec.includes("vorbis")) return "vorbis";
+    if (lowerCodec.includes("flac")) return "flac";
+    if (lowerCodec.includes("mp3")) return "mp3";
+
+    return lowerCodec.split(/[,\s(]/)[0] || "unknown";
+  }
+
+  function getContainerType(fileOrName) {
+    const name = typeof fileOrName === "string" ? fileOrName : fileOrName?.name || "";
+    const lowerName = name.toLowerCase();
+
+    if (lowerName.endsWith(".mkv")) return "mkv";
+    if (lowerName.endsWith(".mp4") || lowerName.endsWith(".m4v")) return "mp4";
+    if (lowerName.endsWith(".webm")) return "webm";
+    if (lowerName.endsWith(".mov")) return "mov";
+
+    return "unknown";
+  }
+
+  function isHevcCodec(codec) {
+    return normalizeVideoCodec(codec) === "hevc";
+  }
+
+  function choosePlaybackStrategy(probe, capabilities = {}) {
+    const videoCodec = normalizeVideoCodec(probe?.videoStreams?.[0]?.codec);
+    const audioCodec = normalizeAudioCodec(probe?.audioStreams?.[0]?.codec);
+    const directPlaybackWorks = capabilities.directPlaybackWorks === true;
+    const mediaSourceSupported = capabilities.mediaSourceSupported !== false;
+
+    if (videoCodec === "hevc") {
+      return {
+        mode: "unsupported",
+        reason: "hevc-deferred",
+        videoCodec,
+        audioCodec,
+        canStartImmediately: false,
+      };
+    }
+
+    if (directPlaybackWorks) {
+      return {
+        mode: "direct",
+        reason: "native-playback",
+        videoCodec,
+        audioCodec,
+        videoMode: "native",
+        audioMode: isAudioCodecUnsupported(audioCodec) ? "native-maybe" : "native",
+        canStartImmediately: true,
+      };
+    }
+
+    if (canCopyVideoCodec(videoCodec) && mediaSourceSupported) {
+      return {
+        mode: "mse-remux",
+        reason: "direct-playback-failed",
+        videoCodec,
+        audioCodec,
+        videoMode: "copy",
+        audioMode: isAudioCodecUnsupported(audioCodec) ? "transcode-aac" : "copy-or-aac",
+        canStartImmediately: false,
+      };
+    }
+
+    return {
+      mode: "unsupported",
+      reason: "unsupported-video-codec",
+      videoCodec,
+      audioCodec,
+      canStartImmediately: false,
+    };
+  }
+
   
   function isVideoCodecSupported(codec) {
-    const lowerCodec = codec.toLowerCase();
+    const lowerCodec = normalizeVideoCodec(codec);
     return SUPPORTED_VIDEO_CODECS.some((c) => lowerCodec.includes(c));
   }
 
   function isBitmapSubtitle(codec) {
-    const lowerCodec = codec.toLowerCase();
+    const lowerCodec = String(codec || "").toLowerCase();
     return BITMAP_SUBTITLE_CODECS.some((c) => lowerCodec.includes(c));
+  }
+
+  function isPgsSubtitle(codec) {
+    const lowerCodec = String(codec || "").toLowerCase();
+    return PGS_SUBTITLE_CODECS.some((c) => lowerCodec.includes(c));
   }
 
   
@@ -227,7 +356,7 @@ const FFmpegHandler = (function () {
             details: line,
           };
 
-          console.log(`Found ${type} stream:`, streamInfo);
+          debug(`Found ${type} stream:`, streamInfo);
 
           switch (type.toLowerCase()) {
             case "video":
@@ -246,7 +375,7 @@ const FFmpegHandler = (function () {
 
       await ffmpeg.deleteFile(inputName);
 
-      console.log("Parsed media info:", streams);
+      debug("Parsed media info:", streams);
       return streams;
     } catch (error) {
       console.error("Error getting media info:", error);
@@ -392,21 +521,21 @@ const FFmpegHandler = (function () {
         ];
       }
 
-      console.log("FFmpeg command:", args.join(" "));
+      debug("FFmpeg command:", args.join(" "));
 
       await ffmpeg.exec(args);
 
       if (progressCallback) progressCallback("Finalizing...");
 
       const data = await ffmpeg.readFile(outputName);
-      console.log("Output file size:", data.length, "bytes");
+      debug("Output file size:", data.length, "bytes");
 
       await ffmpeg.deleteFile(inputName);
       await ffmpeg.deleteFile(outputName);
 
-      const blob = new Blob([data.buffer], { type: "video/mp4" });
+      const blob = new Blob([data], { type: "video/mp4" });
       const url = URL.createObjectURL(blob);
-      console.log("Created blob URL:", url);
+      debug("Created blob URL:", url);
 
       return url;
     } catch (error) {
@@ -481,12 +610,13 @@ const FFmpegHandler = (function () {
             language: language || "und",
             codec: codec,
             isBitmap: isBitmap,
+            isPgs: isPgsSubtitle(codec),
           });
         }
       }
     }
     
-    console.log(`[analyzeStreams] Found: ${videoStreams.length} video, ${audioStreams.length} audio, ${subtitleStreams.length} subtitle`);
+    debug(`[analyzeStreams] Found: ${videoStreams.length} video, ${audioStreams.length} audio, ${subtitleStreams.length} subtitle`);
     
     return { videoStreams, audioStreams, subtitleStreams };
   }
@@ -520,7 +650,7 @@ const FFmpegHandler = (function () {
       
       if (isLargeFile) {
         
-        console.log(`Using WORKERFS for subtitle extraction (file: ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+        debug(`Using WORKERFS for subtitle extraction (file: ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
         
         mountDir = `/workerfs_sub_${Date.now()}`;
         
@@ -591,7 +721,7 @@ const FFmpegHandler = (function () {
       if (progressCallback) progressCallback(`Extracting PGS subtitle track ${subtitleIndex + 1}...`);
       
       if (isLargeFile) {
-        console.log(`Using WORKERFS for PGS extraction (file: ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+        debug(`Using WORKERFS for PGS extraction (file: ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
         
         mountDir = `/workerfs_pgs_${Date.now()}`;
         await ffmpeg.createDir(mountDir);
@@ -614,7 +744,7 @@ const FFmpegHandler = (function () {
       ]);
       
       const data = await ffmpeg.readFile(outputName);
-      console.log(`[PGS] Extracted ${data.length} bytes of SUP data`);
+      debug(`[PGS] Extracted ${data.length} bytes of SUP data`);
       
       await ffmpeg.deleteFile(outputName);
       if (isLargeFile && mountDir) {
@@ -627,7 +757,7 @@ const FFmpegHandler = (function () {
         index: subtitleIndex,
         label: language || `Track ${subtitleIndex + 1}`,
         language: language || "und",
-        supData: data.buffer,
+        supData: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
         isPgs: true,
       };
     } catch (e) {
@@ -698,7 +828,7 @@ const FFmpegHandler = (function () {
       if (progressCallback) progressCallback(`Preparing to extract audio track ${audioIndex + 1}...`);
       
       if (isLargeFile) {
-        console.log(`[extractAudioTrack] Using WORKERFS (file: ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+        debug(`[extractAudioTrack] Using WORKERFS (file: ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
         
         mountDir = `/workerfs_audio_${Date.now()}`;
         await ffmpeg.createDir(mountDir);
@@ -738,7 +868,7 @@ const FFmpegHandler = (function () {
       
       ffmpeg.off("log", logHandler);
       
-      console.log('[extractAudioTrack] FFmpeg exit code:', result);
+      debug('[extractAudioTrack] FFmpeg exit code:', result);
       
       let data;
       try {
@@ -750,7 +880,7 @@ const FFmpegHandler = (function () {
       }
       
       const sizeMB = data.length / 1024 / 1024;
-      console.log(`[extractAudioTrack] Extracted ${sizeMB.toFixed(2)} MB of WAV audio`);
+      debug(`[extractAudioTrack] Extracted ${sizeMB.toFixed(2)} MB of WAV audio`);
       
       // Validate output - WAV should have reasonable size
       if (data.length < 10000) {
@@ -766,7 +896,7 @@ const FFmpegHandler = (function () {
         console.warn('[extractAudioTrack] Warning: WAV header not found, file may be corrupted');
         console.error('[extractAudioTrack] First 12 bytes:', Array.from(header));
       } else {
-        console.log('[extractAudioTrack] Valid WAV file detected');
+        debug('[extractAudioTrack] Valid WAV file detected');
       }
       
       // Cleanup FFmpeg files
@@ -792,7 +922,7 @@ const FFmpegHandler = (function () {
       const blob = new Blob([audioData], { type: "audio/wav" });
       const url = URL.createObjectURL(blob);
       
-      console.log(`[extractAudioTrack] Created audio blob URL: ${url}, size: ${blob.size} bytes`);
+      debug(`[extractAudioTrack] Created audio blob URL: ${url}, size: ${blob.size} bytes`);
       
       return {
         index: audioIndex,
@@ -846,12 +976,12 @@ const FFmpegHandler = (function () {
       if (progressCallback) progressCallback("Analyzing streams...");
       const { videoStreams, audioStreams, subtitleStreams } = await analyzeStreams(file, progressCallback);
       
-      console.log(`Found ${videoStreams.length} video, ${audioStreams.length} audio, ${subtitleStreams.length} subtitle streams`);
+      debug(`Found ${videoStreams.length} video, ${audioStreams.length} audio, ${subtitleStreams.length} subtitle streams`);
       
       
       const videoCodec = videoStreams.length > 0 ? videoStreams[0].codec : 'unknown';
       const isHevc = videoCodec === 'hevc' || videoCodec === 'h265' || videoCodec === 'h.265';
-      console.log(`Video codec: ${videoCodec}, needs transcoding: ${isHevc}`);
+      debug(`Video codec: ${videoCodec}, needs transcoding: ${isHevc}`);
 
       
       result.audioTracks = audioStreams.map((track) => ({
@@ -868,6 +998,7 @@ const FFmpegHandler = (function () {
         language: stream.language || "und",
         codec: stream.codec,
         isBitmap: stream.isBitmap || false,
+        isPgs: stream.isPgs || isPgsSubtitle(stream.codec),
         extracted: false,
       }));
 
@@ -877,7 +1008,7 @@ const FFmpegHandler = (function () {
       if (isLargeFile) {
         
         if (progressCallback) progressCallback("Mounting file (large file mode)...");
-        console.log("Using WORKERFS mount for large file:", (file.size / (1024*1024*1024)).toFixed(2), "GB");
+        debug("Using WORKERFS mount for large file:", (file.size / (1024*1024*1024)).toFixed(2), "GB");
         
         try {
           
@@ -887,7 +1018,7 @@ const FFmpegHandler = (function () {
           await ffmpeg.mount("WORKERFS", { files: [file] }, "/work");
           inputPath = "/work/" + file.name;
           
-          console.log("Mounted file at:", inputPath);
+          debug("Mounted file at:", inputPath);
         } catch (mountError) {
           console.warn("WORKERFS mount failed, falling back to memory load:", mountError);
           
@@ -956,7 +1087,7 @@ const FFmpegHandler = (function () {
         ];
       }
 
-      console.log("FFmpeg command:", args.join(" "));
+      debug("FFmpeg command:", args.join(" "));
       await ffmpeg.exec(args);
 
       if (progressCallback) progressCallback("Finalizing...");
@@ -1030,9 +1161,9 @@ const FFmpegHandler = (function () {
               await ffmpeg.deleteFile(segmentName);
             } else {
               
-              const segmentBlob = new Blob([segmentData.buffer], { type: "video/mp4" });
+              const segmentBlob = new Blob([segmentData], { type: "video/mp4" });
               segments.push(URL.createObjectURL(segmentBlob));
-              console.log(`Segment ${segmentIndex}: ${(segmentData.length / 1024 / 1024).toFixed(1)} MB`);
+              debug(`Segment ${segmentIndex}: ${(segmentData.length / 1024 / 1024).toFixed(1)} MB`);
               
               
               await ffmpeg.deleteFile(segmentName);
@@ -1042,7 +1173,7 @@ const FFmpegHandler = (function () {
               if (segmentIndex > 50) hasMoreSegments = false;
             }
           } catch (segErr) {
-            console.log("Segment extraction ended:", segErr.message);
+            debug("Segment extraction ended:", segErr.message);
             hasMoreSegments = false;
           }
         }
@@ -1051,7 +1182,7 @@ const FFmpegHandler = (function () {
           throw new Error("Failed to create any video segments");
         }
         
-        console.log(`Created ${segments.length} segments`);
+        debug(`Created ${segments.length} segments`);
         
         
         
@@ -1061,13 +1192,13 @@ const FFmpegHandler = (function () {
           
           result.segments = segments;
           videoUrl = segments[0]; 
-          console.log("Multiple segments created. Full seamless playback requires MSE implementation.");
+          debug("Multiple segments created. Full seamless playback requires MSE implementation.");
         }
       } else {
         
         const data = await ffmpeg.readFile(outputName);
-        console.log("Output file size:", data.length, "bytes");
-        const blob = new Blob([data.buffer], { type: "video/mp4" });
+        debug("Output file size:", data.length, "bytes");
+        const blob = new Blob([data], { type: "video/mp4" });
         videoUrl = URL.createObjectURL(blob);
       }
 
@@ -1146,7 +1277,7 @@ const FFmpegHandler = (function () {
       mseInputPath = `${mseMountDir}/${file.name}`;
       mseMountedFile = file;
       
-      console.log('[FFmpeg] Mounted file for MSE at:', mseInputPath);
+      debug('[FFmpeg] Mounted file for MSE at:', mseInputPath);
       return mseInputPath;
     } catch (e) {
       console.error('[FFmpeg] Failed to mount file for MSE:', e);
@@ -1178,12 +1309,7 @@ const FFmpegHandler = (function () {
    * Check if video codec can be copied (already browser-compatible)
    */
   function canCopyVideoCodec(codec) {
-    if (!codec) return false;
-    const lowerCodec = codec.toLowerCase();
-    // H.264/AVC can be copied directly
-    return lowerCodec.includes('h264') || 
-           lowerCodec.includes('avc') || 
-           lowerCodec.includes('x264');
+    return normalizeVideoCodec(codec) === "h264";
   }
 
   /**
@@ -1203,7 +1329,7 @@ const FFmpegHandler = (function () {
     
     // Determine if we can copy video or need to transcode
     const copyVideo = canCopyVideoCodec(videoCodec);
-    console.log(`[FFmpeg] Video codec: ${videoCodec}, copy mode: ${copyVideo}`);
+    debug(`[FFmpeg] Video codec: ${videoCodec}, copy mode: ${copyVideo}`);
     
     let ffmpegLogs = "";
     const logHandler = ({ message }) => {
@@ -1249,7 +1375,7 @@ const FFmpegHandler = (function () {
         outputName
       );
       
-      console.log('[FFmpeg] Init segment command:', args.join(' '));
+      debug('[FFmpeg] Init segment command:', args.join(' '));
       await ffmpeg.exec(args);
       
       ffmpeg.off("log", logHandler);
@@ -1265,10 +1391,10 @@ const FFmpegHandler = (function () {
       
       await ffmpeg.deleteFile(outputName);
       
-      console.log(`[FFmpeg] Init segment: ${data.length} bytes`);
+      debug(`[FFmpeg] Init segment: ${data.length} bytes`);
       
       // Return as ArrayBuffer
-      return data.buffer;
+      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
       
     } catch (e) {
       ffmpeg.off("log", logHandler);
@@ -1363,7 +1489,7 @@ const FFmpegHandler = (function () {
         outputName
       );
       
-      console.log('[FFmpeg] Segment command:', args.join(' '));
+      debug('[FFmpeg] Segment command:', args.join(' '));
       
       // Check abort before exec
       if (abortSignal && abortSignal.aborted) {
@@ -1392,7 +1518,7 @@ const FFmpegHandler = (function () {
         data = await ffmpeg.readFile(outputName);
       } catch (readErr) {
         // Could be end of file
-        console.log('[FFmpeg] Could not read segment, may be end of file');
+        debug('[FFmpeg] Could not read segment, may be end of file');
         return null;
       }
       
@@ -1400,14 +1526,14 @@ const FFmpegHandler = (function () {
       
       // Check for very small output (likely end of file or error)
       if (data.length < 1000) {
-        console.log('[FFmpeg] Segment too small, likely end of file');
+        debug('[FFmpeg] Segment too small, likely end of file');
         return null;
       }
       
-      console.log(`[FFmpeg] Segment ${startTime}s: ${data.length} bytes`);
+      debug(`[FFmpeg] Segment ${startTime}s: ${data.length} bytes`);
       
       // Return as ArrayBuffer
-      return data.buffer;
+      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
       
     } catch (e) {
       ffmpeg.off("log", logHandler);
@@ -1461,7 +1587,7 @@ const FFmpegHandler = (function () {
       const ms = parseInt(durationMatch[4]);
       
       const totalSeconds = hours * 3600 + minutes * 60 + seconds + ms / 100;
-      console.log('[FFmpeg] Detected duration:', totalSeconds, 'seconds');
+      debug('[FFmpeg] Detected duration:', totalSeconds, 'seconds');
       return totalSeconds;
     }
     
@@ -1472,7 +1598,14 @@ const FFmpegHandler = (function () {
   return {
     loadFFmpeg,
     isMkvFile,
+    getContainerType,
+    normalizeVideoCodec,
+    normalizeAudioCodec,
+    isHevcCodec,
+    choosePlaybackStrategy,
+    isPgsSubtitle,
     getMediaInfo,
+    analyzeStreams,
     extractAllSubtitles,
     extractSubtitle,
     extractPgsSubtitle,
